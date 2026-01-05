@@ -157,7 +157,8 @@ File save parameters (capture_pane, task_output ONLY):
     Use non-blocking workflow instead (see section 4.6).
 
 task_output specific (additional):
-    include_command: If True, prepend command in markdown code block (when saving)
+    include_command: If True, prepend command with $ prefix (when saving)
+    markdown: If True, wrap output in ```lang ... ``` code block (when saving)
     tail: If > 0, return only the last N lines (default: 0 = all)
     head: If provided, return only the first N lines
     range: Line range, e.g., "10:20" (0-indexed, within marker output)
@@ -192,12 +193,15 @@ Example - save with command included (markdown format):
     task_wait(task_id)
     task_output(task_id)  # verify
     task_output(task_id, save="/tmp/report.md", append=True,
-                include_command=True, suffix="\n")
+                include_command=True, markdown=True,
+                prefix="### estimate_eco 결과\n\n", suffix="\n")
     # Saves:
+    # ### estimate_eco 결과
+    #
     # ```tcl
-    # estimate_eco -type size_cell $cell
-    # ```
+    # $ estimate_eco -type size_cell $cell
     # (output lines...)
+    # ```
 
 Example - save with custom prefix/suffix:
     task_id = xtcl_start(pane, "report_timing")

@@ -772,7 +772,8 @@ def task_output(
     append: bool = True,
     prefix: str = None,
     suffix: str = None,
-    include_command: bool = False
+    include_command: bool = False,
+    markdown: bool = False
 ) -> str:
     """Get task output (non-blocking).
 
@@ -796,7 +797,8 @@ def task_output(
         append: If True, append to file (>>); if False, overwrite (>)
         prefix: Text to prepend before output (when saving)
         suffix: Text to append after output (when saving)
-        include_command: If True, prepend command in markdown code block (when saving)
+        include_command: If True, prepend command with $ prefix (when saving)
+        markdown: If True, wrap output in ```lang ... ``` code block (when saving)
     """
     if task_id not in _tasks:
         raise ValueError(f"Task '{task_id}' not found")
@@ -825,18 +827,34 @@ def task_output(
     elif tail > 0 and len(all_lines) > tail:
         all_lines = all_lines[-tail:]
 
-    # Build prefix for include_command
-    effective_prefix = prefix
-    if include_command and save:
+    # Build content for saving with markdown/include_command
+    if save and (markdown or include_command):
         lang = task.get("type", "")
         cmd = task.get("command", "")
-        cmd_block = f"```{lang}\n{cmd}\n```\n"
-        effective_prefix = cmd_block + (prefix or '')
+
+        # include_command: prepend "$ cmd" to output
+        if include_command:
+            all_lines = [f"$ {cmd}"] + all_lines
+
+        # markdown: wrap in code block
+        if markdown:
+            md_prefix = f"```{lang}\n"
+            md_suffix = "\n```"
+        else:
+            md_prefix = ""
+            md_suffix = ""
+
+        # Final: prefix + md_prefix + content + md_suffix + suffix
+        effective_prefix = (prefix or '') + md_prefix
+        effective_suffix = md_suffix + (suffix or '')
+    else:
+        effective_prefix = prefix
+        effective_suffix = suffix
 
     return apply_output_filters(
         all_lines, grep=grep, v=v, i=i, w=w, F=F, m=m,
         A=A, B=B, C=C, n=n, uniq=uniq, save=save, append=append,
-        n_negative=False, prefix=effective_prefix, suffix=suffix
+        n_negative=False, prefix=effective_prefix, suffix=effective_suffix
     )
 
 
