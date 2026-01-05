@@ -773,6 +773,7 @@ def task_output(
     prefix: str = None,
     suffix: str = None,
     include_command: bool = False,
+    command_prefix: str = "$ ",
     markdown: bool = False
 ) -> str:
     """Get task output (non-blocking).
@@ -797,7 +798,8 @@ def task_output(
         append: If True, append to file (>>); if False, overwrite (>)
         prefix: Text to prepend before output (when saving)
         suffix: Text to append after output (when saving)
-        include_command: If True, prepend command with $ prefix (when saving)
+        include_command: If True, prepend command to output (when saving)
+        command_prefix: Prefix for include_command (default: "$ "). E.g., "pt_shell> ", ">>> "
         markdown: If True, wrap output in ```lang ... ``` code block (when saving)
     """
     if task_id not in _tasks:
@@ -832,9 +834,9 @@ def task_output(
         lang = task.get("type", "")
         cmd = task.get("command", "")
 
-        # include_command: prepend "$ cmd" to output
+        # include_command: prepend command with prefix to output
         if include_command:
-            all_lines = [f"$ {cmd}"] + all_lines
+            all_lines = [f"{command_prefix}{cmd}"] + all_lines
 
         # markdown: wrap in code block
         if markdown:

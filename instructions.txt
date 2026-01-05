@@ -157,7 +157,8 @@ File save parameters (capture_pane, task_output ONLY):
     Use non-blocking workflow instead (see section 4.6).
 
 task_output specific (additional):
-    include_command: If True, prepend command with $ prefix (when saving)
+    include_command: If True, prepend command to output (when saving)
+    command_prefix: Prefix for include_command (default: "$ "). E.g., "pt_shell> ", ">>> "
     markdown: If True, wrap output in ```lang ... ``` code block (when saving)
     tail: If > 0, return only the last N lines (default: 0 = all)
     head: If provided, return only the first N lines
