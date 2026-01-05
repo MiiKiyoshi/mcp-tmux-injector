@@ -770,6 +770,10 @@ def task_output(
     range: str = None,
     grep: str = None,
     v: str = None,
+    i: bool = False,
+    w: bool = False,
+    F: bool = False,
+    m: int = None,
     A: int = None,
     B: int = None,
     C: int = None,
@@ -787,6 +791,10 @@ def task_output(
         range: Line range, e.g., "10:20" (0-indexed, within marker output)
         grep: Filter lines matching this regex pattern
         v: Exclude lines matching this regex pattern (like grep -v)
+        i: Case insensitive matching (like grep -i)
+        w: Word match - pattern must match whole word (like grep -w)
+        F: Fixed string - treat pattern as literal, not regex (like grep -F)
+        m: Max count - return at most N matching lines (like grep -m)
         A: Lines after grep match (like grep -A)
         B: Lines before grep match (like grep -B)
         C: Lines before and after grep match (like grep -C)
@@ -822,16 +830,25 @@ def task_output(
     elif tail > 0 and len(all_lines) > tail:
         all_lines = all_lines[-tail:]
 
+    # Build regex flags
+    flags = re.IGNORECASE if i else 0
+
     # Apply grep filter with context (A/B/C)
     if grep:
-        pattern = re.compile(grep)
+        pat = re.escape(grep) if F else grep
+        pat = rf'\b{pat}\b' if w else pat
+        pattern = re.compile(pat, flags)
         before = B if B is not None else (C or 0)
         after = A if A is not None else (C or 0)
         all_lines = apply_grep_with_context(all_lines, pattern, before, after)
+        if m is not None and m > 0:
+            all_lines = all_lines[:m]
 
     # Apply exclude filter (grep -v)
     if v:
-        exc_pattern = re.compile(v)
+        pat_v = re.escape(v) if F else v
+        pat_v = rf'\b{pat_v}\b' if w else pat_v
+        exc_pattern = re.compile(pat_v, flags)
         all_lines = [line for line in all_lines if not exc_pattern.search(line)]
 
     # Apply uniq
@@ -1156,6 +1173,10 @@ def capture_pane(
     rel_range: str = None,
     grep: str = None,
     v: str = None,
+    i: bool = False,
+    w: bool = False,
+    F: bool = False,
+    m: int = None,
     A: int = None,
     B: int = None,
     C: int = None,
@@ -1173,6 +1194,10 @@ def capture_pane(
         rel_range: Relative range from end, e.g., "100:50" (100th from end to 50th from end)
         grep: Filter lines matching this regex pattern
         v: Exclude lines matching this regex pattern (like grep -v)
+        i: Case insensitive matching (like grep -i)
+        w: Word match - pattern must match whole word (like grep -w)
+        F: Fixed string - treat pattern as literal, not regex (like grep -F)
+        m: Max count - return at most N matching lines (like grep -m)
         A: Lines after grep match (like grep -A)
         B: Lines before grep match (like grep -B)
         C: Lines before and after grep match (like grep -C)
@@ -1206,16 +1231,25 @@ def capture_pane(
     elif tail > 0 and len(all_lines) > tail:
         all_lines = all_lines[-tail:]
 
+    # Build regex flags
+    flags = re.IGNORECASE if i else 0
+
     # Apply grep filter with context (A/B/C)
     if grep:
-        pattern = re.compile(grep)
+        pat = re.escape(grep) if F else grep
+        pat = rf'\b{pat}\b' if w else pat
+        pattern = re.compile(pat, flags)
         before = B if B is not None else (C or 0)
         after = A if A is not None else (C or 0)
         all_lines = apply_grep_with_context(all_lines, pattern, before, after)
+        if m is not None and m > 0:
+            all_lines = all_lines[:m]
 
     # Apply exclude filter (grep -v)
     if v:
-        exc_pattern = re.compile(v)
+        pat_v = re.escape(v) if F else v
+        pat_v = rf'\b{pat_v}\b' if w else pat_v
+        exc_pattern = re.compile(pat_v, flags)
         all_lines = [line for line in all_lines if not exc_pattern.search(line)]
 
     # Apply uniq
