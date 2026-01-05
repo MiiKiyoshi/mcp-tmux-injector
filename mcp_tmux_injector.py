@@ -391,6 +391,54 @@ def extract_output(raw: str, begin: str, end: str) -> tuple[str, bool]:
     return '\n'.join(result), completed
 
 
+def parse_rel_range(rel_range: str) -> tuple[int, int]:
+    """Parse relative range string like '100:50' or '-100:-50'.
+    Always returns negative indices (from end)."""
+    parts = rel_range.split(":")
+    if len(parts) != 2:
+        raise ValueError(f"Invalid rel_range format: {rel_range}. Use 'START:END' (e.g., '100:50')")
+
+    start_str, end_str = parts
+    start = -abs(int(start_str)) if start_str.strip() else None
+    end = -abs(int(end_str)) if end_str.strip() else None
+    return start, end
+
+
+def apply_dedupe(lines: list[str]) -> list[str]:
+    """Remove consecutive duplicate lines."""
+    if not lines:
+        return lines
+    result = [lines[0]]
+    for line in lines[1:]:
+        if line != result[-1]:
+            result.append(line)
+    return result
+
+
+def apply_grep_with_context(lines: list[str], pattern: re.Pattern, context: int) -> list[str]:
+    """Apply grep with context lines."""
+    if context <= 0:
+        return [line for line in lines if pattern.search(line)]
+
+    matches = set()
+    for i, line in enumerate(lines):
+        if pattern.search(line):
+            for j in range(max(0, i - context), min(len(lines), i + context + 1)):
+                matches.add(j)
+
+    return [lines[i] for i in sorted(matches)]
+
+
+def save_to_file(content: str, file_path: str, append: bool) -> str:
+    """Save content to file."""
+    mode = 'a' if append else 'w'
+    with open(os.path.expanduser(file_path), mode) as f:
+        f.write(content)
+        if not content.endswith('\n'):
+            f.write('\n')
+    return file_path
+
+
 def check_task_output(session: str, begin: str, end: str) -> tuple[str, bool]:
     """Check current output for a task. Returns (output, is_complete)."""
     raw = run_tmux_cmd(["capture-pane", "-t", session, "-p", "-S", "-"])
@@ -713,13 +761,33 @@ def task_status(task_id: str) -> str:
 
 
 @mcp.tool()
-def task_output(task_id: str, lines: int = 0, grep: str = None) -> str:
+def task_output(
+    task_id: str,
+    tail: int = 0,
+    head: int = None,
+    range: str = None,
+    grep: str = None,
+    exclude: str = None,
+    context: int = 0,
+    line_numbers: bool = False,
+    dedupe: bool = True,
+    save: str = None,
+    append: bool = True
+) -> str:
     """Get task output (non-blocking).
 
     Args:
         task_id: Task ID from xpy_start, xtcl_start, or xsh_start
-        lines: If > 0, return only the last N lines (default: 0 = all)
-        grep: If provided, filter lines matching this regex pattern
+        tail: If > 0, return only the last N lines (default: 0 = all)
+        head: If provided, return only the first N lines
+        range: Line range, e.g., "10:20" (0-indexed, within marker output)
+        grep: Filter lines matching this regex pattern
+        exclude: Exclude lines matching this regex pattern
+        context: Number of lines before/after grep matches to include
+        line_numbers: Show line numbers (0-indexed from start)
+        dedupe: Remove consecutive duplicate lines (default: True)
+        save: File path to save output (optional)
+        append: If True, append to file (>>); if False, overwrite (>)
     """
     if task_id not in _tasks:
         raise ValueError(f"Task '{task_id}' not found")
@@ -732,19 +800,47 @@ def task_output(task_id: str, lines: int = 0, grep: str = None) -> str:
         task["lock"].release()
         del task["lock"]
 
-    # Apply grep filter
-    if grep and output:
+    if not output:
+        return output
+
+    all_lines = output.split('\n')
+
+    # Apply range, head, or tail
+    if range:
+        parts = range.split(":")
+        start = int(parts[0]) if parts[0].strip() else 0
+        end = int(parts[1]) if parts[1].strip() else len(all_lines)
+        all_lines = all_lines[start:end]
+    elif head is not None and head > 0:
+        all_lines = all_lines[:head]
+    elif tail > 0 and len(all_lines) > tail:
+        all_lines = all_lines[-tail:]
+
+    # Apply grep filter with context
+    if grep:
         pattern = re.compile(grep)
-        filtered = [line for line in output.split('\n') if pattern.search(line)]
-        output = '\n'.join(filtered)
+        all_lines = apply_grep_with_context(all_lines, pattern, context)
 
-    # Truncate to last N lines
-    if lines > 0 and output:
-        all_lines = output.split('\n')
-        if len(all_lines) > lines:
-            output = '\n'.join(all_lines[-lines:])
+    # Apply exclude filter
+    if exclude:
+        exc_pattern = re.compile(exclude)
+        all_lines = [line for line in all_lines if not exc_pattern.search(line)]
 
-    return output
+    # Apply dedupe
+    if dedupe:
+        all_lines = apply_dedupe(all_lines)
+
+    # Apply line numbers
+    if line_numbers:
+        all_lines = [f"{i}: {line}" for i, line in enumerate(all_lines)]
+
+    result = '\n'.join(all_lines)
+
+    # Save to file if requested
+    if save:
+        save_to_file(result, save, append)
+
+    return result
 
 
 @mcp.tool()
@@ -1046,13 +1142,33 @@ def send_keys(pane: str, keys: str, enter: bool = False) -> str:
 
 
 @mcp.tool()
-def capture_pane(pane: str, lines: int = 5, grep: str = None) -> str:
+def capture_pane(
+    pane: str,
+    tail: int = 5,
+    rel_range: str = None,
+    grep: str = None,
+    exclude: str = None,
+    context: int = 0,
+    since_marker: str = None,
+    dedupe: bool = True,
+    line_numbers: bool = False,
+    save: str = None,
+    append: bool = True
+) -> str:
     """Capture current pane content.
 
     Args:
         pane: Registered tmux pane (e.g., t1:1.0)
-        lines: Number of lines to capture from end (default: 5)
-        grep: If provided, filter lines matching this regex pattern
+        tail: Number of lines to capture from end (default: 5)
+        rel_range: Relative range from end, e.g., "100:50" (100th from end to 50th from end)
+        grep: Filter lines matching this regex pattern
+        exclude: Exclude lines matching this regex pattern
+        context: Number of lines before/after grep matches to include
+        since_marker: Only capture lines after this marker
+        dedupe: Remove consecutive duplicate lines (default: True)
+        line_numbers: Show line numbers as negative indices from end
+        save: File path to save output (optional)
+        append: If True, append to file (>>); if False, overwrite (>)
     """
     check_pane_registered(pane)
 
@@ -1062,15 +1178,48 @@ def capture_pane(pane: str, lines: int = 5, grep: str = None) -> str:
     raw = run_tmux_cmd(["capture-pane", "-t", pane, "-p", "-S", "-"])
     all_lines = raw.rstrip().split('\n')
 
-    # Apply grep filter first
+    # Apply since_marker filter
+    if since_marker:
+        marker_idx = None
+        for i, line in enumerate(all_lines):
+            if since_marker in line:
+                marker_idx = i
+        if marker_idx is not None:
+            all_lines = all_lines[marker_idx + 1:]
+
+    # Apply rel_range or tail
+    if rel_range:
+        start, end = parse_rel_range(rel_range)
+        all_lines = all_lines[start:end]
+    elif tail > 0 and len(all_lines) > tail:
+        all_lines = all_lines[-tail:]
+
+    # Apply grep filter with context
     if grep:
         pattern = re.compile(grep)
-        all_lines = [line for line in all_lines if pattern.search(line)]
+        all_lines = apply_grep_with_context(all_lines, pattern, context)
 
-    # Then truncate to last N lines
-    if len(all_lines) > lines:
-        return '\n'.join(all_lines[-lines:])
-    return '\n'.join(all_lines)
+    # Apply exclude filter
+    if exclude:
+        exc_pattern = re.compile(exclude)
+        all_lines = [line for line in all_lines if not exc_pattern.search(line)]
+
+    # Apply dedupe
+    if dedupe:
+        all_lines = apply_dedupe(all_lines)
+
+    # Apply line numbers (negative, from end)
+    if line_numbers:
+        total = len(all_lines)
+        all_lines = [f"{i - total}: {line}" for i, line in enumerate(all_lines)]
+
+    result = '\n'.join(all_lines)
+
+    # Save to file if requested
+    if save:
+        save_to_file(result, save, append)
+
+    return result
 
 
 @mcp.tool()
