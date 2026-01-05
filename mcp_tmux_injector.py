@@ -415,15 +415,17 @@ def apply_dedupe(lines: list[str]) -> list[str]:
     return result
 
 
-def apply_grep_with_context(lines: list[str], pattern: re.Pattern, context: int) -> list[str]:
-    """Apply grep with context lines."""
-    if context <= 0:
+def apply_grep_with_context(lines: list[str], pattern: re.Pattern, before: int = 0, after: int = 0) -> list[str]:
+    """Apply grep with context lines (like grep -B/-A)."""
+    if before <= 0 and after <= 0:
         return [line for line in lines if pattern.search(line)]
 
     matches = set()
     for i, line in enumerate(lines):
         if pattern.search(line):
-            for j in range(max(0, i - context), min(len(lines), i + context + 1)):
+            start = max(0, i - before)
+            end = min(len(lines), i + after + 1)
+            for j in range(start, end):
                 matches.add(j)
 
     return [lines[i] for i in sorted(matches)]
@@ -767,10 +769,12 @@ def task_output(
     head: int = None,
     range: str = None,
     grep: str = None,
-    exclude: str = None,
-    context: int = 0,
-    line_numbers: bool = False,
-    dedupe: bool = True,
+    v: str = None,
+    A: int = None,
+    B: int = None,
+    C: int = None,
+    n: bool = False,
+    uniq: bool = True,
     save: str = None,
     append: bool = True
 ) -> str:
@@ -782,10 +786,12 @@ def task_output(
         head: If provided, return only the first N lines
         range: Line range, e.g., "10:20" (0-indexed, within marker output)
         grep: Filter lines matching this regex pattern
-        exclude: Exclude lines matching this regex pattern
-        context: Number of lines before/after grep matches to include
-        line_numbers: Show line numbers (0-indexed from start)
-        dedupe: Remove consecutive duplicate lines (default: True)
+        v: Exclude lines matching this regex pattern (like grep -v)
+        A: Lines after grep match (like grep -A)
+        B: Lines before grep match (like grep -B)
+        C: Lines before and after grep match (like grep -C)
+        n: Show line numbers (like grep -n)
+        uniq: Remove consecutive duplicate lines (like uniq, default: True)
         save: File path to save output (optional)
         append: If True, append to file (>>); if False, overwrite (>)
     """
@@ -816,22 +822,24 @@ def task_output(
     elif tail > 0 and len(all_lines) > tail:
         all_lines = all_lines[-tail:]
 
-    # Apply grep filter with context
+    # Apply grep filter with context (A/B/C)
     if grep:
         pattern = re.compile(grep)
-        all_lines = apply_grep_with_context(all_lines, pattern, context)
+        before = B if B is not None else (C or 0)
+        after = A if A is not None else (C or 0)
+        all_lines = apply_grep_with_context(all_lines, pattern, before, after)
 
-    # Apply exclude filter
-    if exclude:
-        exc_pattern = re.compile(exclude)
+    # Apply exclude filter (grep -v)
+    if v:
+        exc_pattern = re.compile(v)
         all_lines = [line for line in all_lines if not exc_pattern.search(line)]
 
-    # Apply dedupe
-    if dedupe:
+    # Apply uniq
+    if uniq:
         all_lines = apply_dedupe(all_lines)
 
-    # Apply line numbers
-    if line_numbers:
+    # Apply line numbers (grep -n)
+    if n:
         all_lines = [f"{i}: {line}" for i, line in enumerate(all_lines)]
 
     result = '\n'.join(all_lines)
@@ -1147,11 +1155,13 @@ def capture_pane(
     tail: int = 5,
     rel_range: str = None,
     grep: str = None,
-    exclude: str = None,
-    context: int = 0,
+    v: str = None,
+    A: int = None,
+    B: int = None,
+    C: int = None,
     since_marker: str = None,
-    dedupe: bool = True,
-    line_numbers: bool = False,
+    uniq: bool = True,
+    n: bool = False,
     save: str = None,
     append: bool = True
 ) -> str:
@@ -1162,11 +1172,13 @@ def capture_pane(
         tail: Number of lines to capture from end (default: 5)
         rel_range: Relative range from end, e.g., "100:50" (100th from end to 50th from end)
         grep: Filter lines matching this regex pattern
-        exclude: Exclude lines matching this regex pattern
-        context: Number of lines before/after grep matches to include
+        v: Exclude lines matching this regex pattern (like grep -v)
+        A: Lines after grep match (like grep -A)
+        B: Lines before grep match (like grep -B)
+        C: Lines before and after grep match (like grep -C)
         since_marker: Only capture lines after this marker
-        dedupe: Remove consecutive duplicate lines (default: True)
-        line_numbers: Show line numbers as negative indices from end
+        uniq: Remove consecutive duplicate lines (like uniq, default: True)
+        n: Show line numbers as negative indices from end (like nl/cat -n)
         save: File path to save output (optional)
         append: If True, append to file (>>); if False, overwrite (>)
     """
@@ -1194,22 +1206,24 @@ def capture_pane(
     elif tail > 0 and len(all_lines) > tail:
         all_lines = all_lines[-tail:]
 
-    # Apply grep filter with context
+    # Apply grep filter with context (A/B/C)
     if grep:
         pattern = re.compile(grep)
-        all_lines = apply_grep_with_context(all_lines, pattern, context)
+        before = B if B is not None else (C or 0)
+        after = A if A is not None else (C or 0)
+        all_lines = apply_grep_with_context(all_lines, pattern, before, after)
 
-    # Apply exclude filter
-    if exclude:
-        exc_pattern = re.compile(exclude)
+    # Apply exclude filter (grep -v)
+    if v:
+        exc_pattern = re.compile(v)
         all_lines = [line for line in all_lines if not exc_pattern.search(line)]
 
-    # Apply dedupe
-    if dedupe:
+    # Apply uniq
+    if uniq:
         all_lines = apply_dedupe(all_lines)
 
     # Apply line numbers (negative, from end)
-    if line_numbers:
+    if n:
         total = len(all_lines)
         all_lines = [f"{i - total}: {line}" for i, line in enumerate(all_lines)]
 
