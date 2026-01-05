@@ -127,14 +127,10 @@ send_keys: "Keys sent"
 capture_pane: Current pane content (last N lines)
 
 ==========
-4.5. OUTPUT FILTERING (ALL TOOLS)
+4.5. OUTPUT FILTERING
 ==========
 
-The following tools support grep-style filtering options:
-- Blocking: xpy, xtcl, xsh
-- Monitoring: capture_pane, task_output
-
-Common filtering parameters:
+Filtering parameters (grep-style):
 
     grep: Filter lines matching this regex pattern
     v: Exclude lines matching this regex pattern (like grep -v)
@@ -147,8 +143,14 @@ Common filtering parameters:
     C: Lines before and after grep match (like grep -C)
     n: Show line numbers (like grep -n)
     uniq: Remove consecutive duplicate lines (like uniq, default: True)
-    save: File path to save output (optional)
+
+File save parameters (capture_pane, task_output ONLY):
+
+    save: File path to save output
     append: If True, append to file (>>); if False, overwrite (>)
+
+    NOTE: Blocking tools (xpy, xtcl, xsh) do NOT support save/append.
+    Use non-blocking workflow instead (see section 4.6).
 
 capture_pane specific:
     tail: Number of lines to capture from end (default: 5)
@@ -160,22 +162,31 @@ task_output specific:
     head: If provided, return only the first N lines
     range: Line range, e.g., "10:20" (0-indexed, within marker output)
 
-Examples:
-    # Run command and save filtered output directly
-    xtcl(pane, "report_timing", grep="slack", save="/tmp/timing.txt")
+==========
+4.6. FILE SAVE WORKFLOW (CRITICAL)
+==========
 
-    # Exclude marker lines from saved output
-    xtcl(pane, "estimate_eco ...", save="/tmp/eco.txt", v="_X[0-9a-f]+_")
+To save command output to a file, use the non-blocking workflow:
 
-    # Case insensitive search with context
-    capture_pane(pane, tail=100, grep="error", i=True, C=3)
+    1. xtcl_start(pane, "command")        # returns task_id
+    2. task_wait(task_id)                 # wait for completion
+    3. task_output(task_id)               # verify output is correct
+    4. task_output(task_id, save="...", append=True)  # save after verification
 
-    # Save specific range to file
-    capture_pane(pane, tail=50, n=True)  # first, check line numbers
-    capture_pane(pane, rel_range="30:10", save="/tmp/log.txt", append=False)
+WHY: This allows you to verify the command succeeded before saving.
+     Blocking tools cannot save because you can't verify before saving.
 
-    # Filter task output
-    task_output(task_id, grep="Episode", A=2, m=10)  # first 10 matches with 2 lines after
+Example - save estimate_eco output to report:
+    task_id = xtcl_start(pane, "estimate_eco -type size_cell $cell")
+    task_wait(task_id)
+    task_output(task_id)  # check output looks correct
+    task_output(task_id, save="/tmp/report.md", append=True)
+
+Example - save with filtering:
+    task_id = xtcl_start(pane, "report_timing")
+    task_wait(task_id)
+    task_output(task_id, grep="slack")  # verify filtered output
+    task_output(task_id, grep="slack", save="/tmp/slack.txt", append=True)
 
 ==========
 5. ABORT/TIMEOUT DOES NOT MEAN "COMMAND NOT SENT" (CRITICAL)

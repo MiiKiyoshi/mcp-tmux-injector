@@ -395,9 +395,7 @@ async def xpy(
     B: int = None,
     C: int = None,
     n: bool = False,
-    uniq: bool = True,
-    save: str = None,
-    append: bool = True
+    uniq: bool = True
 ) -> str:
     """Execute Python code in tmux (blocking). Waits for completion.
 
@@ -417,8 +415,6 @@ async def xpy(
         C: Lines before and after grep match (like grep -C)
         n: Show line numbers (like grep -n)
         uniq: Remove consecutive duplicate lines (like uniq, default: True)
-        save: File path to save output (optional)
-        append: If True, append to file (>>); if False, overwrite (>)
     """
     check_pane_registered(pane)
 
@@ -448,7 +444,7 @@ async def xpy(
         lines = output.split('\n') if output else []
         return apply_output_filters(
             lines, grep=grep, v=v, i=i, w=w, F=F, m=m,
-            A=A, B=B, C=C, n=n, uniq=uniq, save=save, append=append,
+            A=A, B=B, C=C, n=n, uniq=uniq,
             n_negative=False
         )
     finally:
@@ -470,9 +466,7 @@ async def xtcl(
     B: int = None,
     C: int = None,
     n: bool = False,
-    uniq: bool = True,
-    save: str = None,
-    append: bool = True
+    uniq: bool = True
 ) -> str:
     """Execute TCL code in tmux (blocking). For EDA tools like Innovus, OpenROAD.
 
@@ -491,8 +485,6 @@ async def xtcl(
         C: Lines before and after grep match (like grep -C)
         n: Show line numbers (like grep -n)
         uniq: Remove consecutive duplicate lines (like uniq, default: True)
-        save: File path to save output (optional)
-        append: If True, append to file (>>); if False, overwrite (>)
     """
     check_pane_registered(pane)
 
@@ -510,7 +502,7 @@ async def xtcl(
         lines = output.split('\n') if output else []
         return apply_output_filters(
             lines, grep=grep, v=v, i=i, w=w, F=F, m=m,
-            A=A, B=B, C=C, n=n, uniq=uniq, save=save, append=append,
+            A=A, B=B, C=C, n=n, uniq=uniq,
             n_negative=False
         )
     finally:
@@ -533,9 +525,7 @@ async def xsh(
     B: int = None,
     C: int = None,
     n: bool = False,
-    uniq: bool = True,
-    save: str = None,
-    append: bool = True
+    uniq: bool = True
 ) -> str:
     """Execute shell command in tmux (blocking). Waits for completion.
 
@@ -555,8 +545,6 @@ async def xsh(
         C: Lines before and after grep match (like grep -C)
         n: Show line numbers (like grep -n)
         uniq: Remove consecutive duplicate lines (like uniq, default: True)
-        save: File path to save output (optional)
-        append: If True, append to file (>>); if False, overwrite (>)
     """
     check_pane_registered(pane)
 
@@ -583,7 +571,7 @@ async def xsh(
         lines = output.split('\n') if output else []
         return apply_output_filters(
             lines, grep=grep, v=v, i=i, w=w, F=F, m=m,
-            A=A, B=B, C=C, n=n, uniq=uniq, save=save, append=append,
+            A=A, B=B, C=C, n=n, uniq=uniq,
             n_negative=False
         )
     finally:
