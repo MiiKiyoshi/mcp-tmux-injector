@@ -268,7 +268,9 @@ def apply_output_filters(
     uniq: bool = True,
     save: str = None,
     append: bool = True,
-    n_negative: bool = False
+    n_negative: bool = False,
+    prefix: str = None,
+    suffix: str = None
 ) -> str:
     """Apply common output filters and optionally save to file.
 
@@ -288,6 +290,8 @@ def apply_output_filters(
         save: File path to save output (optional)
         append: If True, append to file (>>); if False, overwrite (>)
         n_negative: If True, show negative line numbers (for capture_pane)
+        prefix: Text to prepend when saving (optional)
+        suffix: Text to append when saving (optional)
 
     Returns:
         Filtered output as string
@@ -329,7 +333,8 @@ def apply_output_filters(
 
     # Save to file if requested
     if save:
-        save_to_file(result, save, append)
+        save_content = (prefix or '') + result + (suffix or '')
+        save_to_file(save_content, save, append)
 
     return result
 
@@ -629,6 +634,7 @@ def xpy_start(
         "end": end,
         "start_time": time.time(),
         "type": "python",
+        "command": code,
         "lock": lock
     }
 
@@ -663,6 +669,7 @@ def xtcl_start(pane: str, code: str) -> str:
         "end": end,
         "start_time": time.time(),
         "type": "tcl",
+        "command": code,
         "lock": lock
     }
 
@@ -713,6 +720,7 @@ def xsh_start(
         "end": end,
         "start_time": time.time(),
         "type": "shell",
+        "command": code,
         "lock": lock
     }
 
@@ -761,7 +769,10 @@ def task_output(
     n: bool = False,
     uniq: bool = True,
     save: str = None,
-    append: bool = True
+    append: bool = True,
+    prefix: str = None,
+    suffix: str = None,
+    include_command: bool = False
 ) -> str:
     """Get task output (non-blocking).
 
@@ -783,6 +794,9 @@ def task_output(
         uniq: Remove consecutive duplicate lines (like uniq, default: True)
         save: File path to save output (optional)
         append: If True, append to file (>>); if False, overwrite (>)
+        prefix: Text to prepend before output (when saving)
+        suffix: Text to append after output (when saving)
+        include_command: If True, prepend command in markdown code block (when saving)
     """
     if task_id not in _tasks:
         raise ValueError(f"Task '{task_id}' not found")
@@ -811,10 +825,18 @@ def task_output(
     elif tail > 0 and len(all_lines) > tail:
         all_lines = all_lines[-tail:]
 
+    # Build prefix for include_command
+    effective_prefix = prefix
+    if include_command and save:
+        lang = task.get("type", "")
+        cmd = task.get("command", "")
+        cmd_block = f"```{lang}\n{cmd}\n```\n"
+        effective_prefix = cmd_block + (prefix or '')
+
     return apply_output_filters(
         all_lines, grep=grep, v=v, i=i, w=w, F=F, m=m,
         A=A, B=B, C=C, n=n, uniq=uniq, save=save, append=append,
-        n_negative=False
+        n_negative=False, prefix=effective_prefix, suffix=suffix
     )
 
 
@@ -857,7 +879,11 @@ def task_list() -> str:
         elapsed = time.time() - task["start_time"]
         output, completed = check_task_output(task["pane"], task["begin"], task["end"])
         status = "completed" if completed else "running"
-        lines.append(f"  {task_id}: {task['type']} on {task['pane']} [{status}] {elapsed:.1f}s")
+        # Truncate command for display (max 40 chars)
+        cmd = task.get("command", "")
+        cmd_display = (cmd[:37] + "...") if len(cmd) > 40 else cmd
+        cmd_display = cmd_display.replace('\n', ' ')  # single line
+        lines.append(f"  {task_id} [{task['type']}] [{status}] {elapsed:.1f}s  \"{cmd_display}\"")
 
     return '\n'.join(lines)
 
@@ -1134,7 +1160,9 @@ def capture_pane(
     uniq: bool = True,
     n: bool = False,
     save: str = None,
-    append: bool = True
+    append: bool = True,
+    prefix: str = None,
+    suffix: str = None
 ) -> str:
     """Capture current pane content.
 
@@ -1156,6 +1184,8 @@ def capture_pane(
         n: Show line numbers as negative indices from end (like nl/cat -n)
         save: File path to save output (optional)
         append: If True, append to file (>>); if False, overwrite (>)
+        prefix: Text to prepend when saving (optional)
+        suffix: Text to append when saving (optional)
     """
     check_pane_registered(pane)
 
@@ -1184,7 +1214,7 @@ def capture_pane(
     return apply_output_filters(
         all_lines, grep=grep, v=v, i=i, w=w, F=F, m=m,
         A=A, B=B, C=C, n=n, uniq=uniq, save=save, append=append,
-        n_negative=True
+        n_negative=True, prefix=prefix, suffix=suffix
     )
 
 
