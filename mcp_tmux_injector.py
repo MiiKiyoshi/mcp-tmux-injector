@@ -333,7 +333,10 @@ def apply_output_filters(
 
     # Save to file if requested
     if save:
-        save_content = (prefix or '') + result + (suffix or '')
+        # Process escape sequences (\n, \t) in prefix/suffix
+        eff_prefix = (prefix or '').replace('\\n', '\n').replace('\\t', '\t')
+        eff_suffix = (suffix or '').replace('\\n', '\n').replace('\\t', '\t')
+        save_content = eff_prefix + result + eff_suffix
         save_to_file(save_content, save, append)
 
     return result
