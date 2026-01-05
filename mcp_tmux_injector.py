@@ -166,11 +166,52 @@ xsh/xpy/xtcl: Command output (waits for completion)
 xsh_start/xpy_start/xtcl_start: Task ID string
 xsh_peek/xpy_peek/xtcl_peek: Output captured after wait seconds
 task_status: "[running] Xs" or "[completed] Xs" (status only, lightweight)
-task_output: Current output (use lines=N for last N, grep="pattern" for filtering)
+task_output: Current output (use tail=N for last N, grep="pattern" for filtering)
 task_wait: "[completed] Xs" (blocks until done)
 send_text: "Text sent"
 send_keys: "Keys sent"
 capture_pane: Current pane content (last N lines)
+
+==========
+4.5. OUTPUT FILTERING (capture_pane & task_output)
+==========
+
+Both capture_pane and task_output support grep-style filtering options:
+
+    grep: Filter lines matching this regex pattern
+    v: Exclude lines matching this regex pattern (like grep -v)
+    i: Case insensitive matching (like grep -i)
+    w: Word match - pattern must match whole word (like grep -w)
+    F: Fixed string - treat pattern as literal, not regex (like grep -F)
+    m: Max count - return at most N matching lines (like grep -m)
+    A: Lines after grep match (like grep -A)
+    B: Lines before grep match (like grep -B)
+    C: Lines before and after grep match (like grep -C)
+    n: Show line numbers (like grep -n)
+    uniq: Remove consecutive duplicate lines (like uniq, default: True)
+    save: File path to save output (optional)
+    append: If True, append to file (>>); if False, overwrite (>)
+
+capture_pane specific:
+    tail: Number of lines to capture from end (default: 5)
+    rel_range: Relative range from end, e.g., "100:50" (100th from end to 50th from end)
+    since_marker: Only capture lines after this marker
+
+task_output specific:
+    tail: If > 0, return only the last N lines (default: 0 = all)
+    head: If provided, return only the first N lines
+    range: Line range, e.g., "10:20" (0-indexed, within marker output)
+
+Examples:
+    # Case insensitive search with context
+    capture_pane(pane, tail=100, grep="error", i=True, C=3)
+
+    # Save specific range to file
+    capture_pane(pane, tail=50, n=True)  # first, check line numbers
+    capture_pane(pane, rel_range="30:10", save="/tmp/log.txt", append=False)
+
+    # Filter task output
+    task_output(task_id, grep="Episode", A=2, m=10)  # first 10 matches with 2 lines after
 
 ==========
 5. ABORT/TIMEOUT DOES NOT MEAN "COMMAND NOT SENT" (CRITICAL)
