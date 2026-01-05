@@ -42,239 +42,10 @@ import re
 import threading
 import asyncio
 from mcp.server.fastmcp import FastMCP
+from pathlib import Path
 
-INSTRUCTIONS = """
-This describes how you use tmux-injector tools. This is how the system works.
-
-==========
-0. PANE REGISTRATION (REQUIRED)
-==========
-
-All panes MUST be registered before use. This prevents accidents after conversation compaction.
-
-Register a pane:
-    set_working_pane("t1:1.0", "OpenROAD Python REPL")
-    set_working_pane("t1:1.1", "bash for git")
-
-Check registered panes:
-    get_working_panes()  # Shows all registered panes with descriptions
-
-Remove a pane:
-    remove_working_pane("t1:1.1")
-
-If you get "Pane not registered" error:
-    1. Context may have been lost due to compaction
-    2. Run get_working_panes() to see what's registered
-    3. Ask user for permission before registering new panes
-
-==========
-1. TOOL SELECTION
-==========
-
-The pane has a current state: bash prompt ($), Python REPL (>>>), TCL interpreter (%), or running process.
-The tool you use depends on this state and what you want to do.
-
-CASE A: Short command that completes and returns to prompt
-Tool: xsh, xpy, or xtcl (blocking)
-Example: xsh(pane, "ls -la") → waits for completion, returns output
-
-CASE B: Long-running task that eventually completes
-Tool: xsh_start, xpy_start, or xtcl_start (non-blocking)
-Then: task_status(task_id) for status, task_output(task_id) for output, task_wait(task_id) to block
-Example: xsh_start(pane, "make build") → returns task_id immediately
-
-CASE C: Starting a process or interpreter (no end marker expected)
-Tool: xsh_peek, xpy_peek, or xtcl_peek
-Example: xsh_peek(pane, "python3", wait=1) → starts Python, captures prompt
-Example: xsh_peek(pane, "openroad -python train.py", wait=2) → starts long process, captures initial output
-Example: xpy_peek(pane, "exit()", wait=1) → exits interpreter (no end marker)
-
-CASE D: Responding to a prompt (password, yes/no)
-Tool: send_text
-Example: send_text(pane, "mypassword") → sends password, presses Enter
-
-CASE E: Sending special keys (Ctrl+C, arrows, Escape)
-Tool: send_keys
-Example: send_keys(pane, "C-c C-c C-c") → sends Ctrl+C three times
-
-==========
-2. CHECKING PANE STATE
-==========
-
-Before choosing a tool, check what is running in the pane.
-Tool: capture_pane(pane, lines=5)
-
-If you see "$" or bash prompt: use xsh variants
-If you see ">>>" or Python prompt: use xpy variants
-If you see "%" or TCL prompt: use xtcl variants
-If you see running output: use capture_pane to monitor, or send_keys("C-c") to interrupt
-
-==========
-3. COMMON PATTERNS
-==========
-
-Starting an interpreter and running code:
-    xsh_peek(pane, "python3", wait=1)      # start interpreter
-    xpy(pane, "print('hello')")            # run code (blocking)
-    xpy_peek(pane, "exit()", wait=1)       # exit interpreter
-
-Starting a long-running script (with monitoring):
-    xsh_peek(pane, "python3", wait=1)      # start interpreter
-    xpy_start(pane, file="train.py")       # returns task_id
-    task_status(task_id)                   # "[running] 30s" - quick status check
-    task_output(task_id, lines=10)         # last 10 lines of output
-    task_output(task_id, grep="Episode")   # filter for Episode lines
-    task_wait(task_id, timeout=300)        # block until complete
-    # file= parameter converts to: exec(open('/absolute/path/train.py').read())
-
-Starting a long-running process (without monitoring):
-    xsh_peek(pane, "python3 train.py", wait=2)  # no task_id
-    capture_pane(pane, lines=30)                # manual check only
-
-SSH connection:
-    xsh_peek(pane, "ssh user@host", wait=2)  # connect
-    send_text(pane, "password")              # if password prompt appears
-    capture_pane(pane)                       # verify login
-    xsh(pane, "hostname")                    # run commands
-    xsh_peek(pane, "exit", wait=1)           # disconnect
-
-Interrupting a process:
-    send_keys(pane, "C-c C-c C-c")         # Ctrl+C multiple times
-    capture_pane(pane)                      # verify interrupted
-
-Passing variables from REPL to script (globals trick):
-    # In REPL, define variables before running script:
-    xpy(pane, "model_path = '/path/to/model'")
-    xpy(pane, "learning_rate = 0.001")
-    xpy_start(pane, file="train.py")       # script can access these variables
-
-    # In train.py, use globals().get() to read REPL variables with defaults:
-    # model_path = globals().get('model_path', None)
-    # learning_rate = globals().get('learning_rate', 0.01)
-    # if model_path: agent.load(model_path)
-
-    # This works because file= uses exec() which shares REPL's globals()
-
-==========
-4. WHAT EACH TOOL RETURNS
-==========
-
-set_working_pane: "Registered: t1:1.0 (description)"
-get_working_panes: List of registered panes with descriptions
-remove_working_pane: "Removed: t1:1.0"
-xsh/xpy/xtcl: Command output (waits for completion)
-xsh_start/xpy_start/xtcl_start: Task ID string
-xsh_peek/xpy_peek/xtcl_peek: Output captured after wait seconds
-task_status: "[running] Xs" or "[completed] Xs" (status only, lightweight)
-task_output: Current output (use tail=N for last N, grep="pattern" for filtering)
-task_wait: "[completed] Xs" (blocks until done)
-send_text: "Text sent"
-send_keys: "Keys sent"
-capture_pane: Current pane content (last N lines)
-
-==========
-4.5. OUTPUT FILTERING (capture_pane & task_output)
-==========
-
-Both capture_pane and task_output support grep-style filtering options:
-
-    grep: Filter lines matching this regex pattern
-    v: Exclude lines matching this regex pattern (like grep -v)
-    i: Case insensitive matching (like grep -i)
-    w: Word match - pattern must match whole word (like grep -w)
-    F: Fixed string - treat pattern as literal, not regex (like grep -F)
-    m: Max count - return at most N matching lines (like grep -m)
-    A: Lines after grep match (like grep -A)
-    B: Lines before grep match (like grep -B)
-    C: Lines before and after grep match (like grep -C)
-    n: Show line numbers (like grep -n)
-    uniq: Remove consecutive duplicate lines (like uniq, default: True)
-    save: File path to save output (optional)
-    append: If True, append to file (>>); if False, overwrite (>)
-
-capture_pane specific:
-    tail: Number of lines to capture from end (default: 5)
-    rel_range: Relative range from end, e.g., "100:50" (100th from end to 50th from end)
-    since_marker: Only capture lines after this marker
-
-task_output specific:
-    tail: If > 0, return only the last N lines (default: 0 = all)
-    head: If provided, return only the first N lines
-    range: Line range, e.g., "10:20" (0-indexed, within marker output)
-
-Examples:
-    # Case insensitive search with context
-    capture_pane(pane, tail=100, grep="error", i=True, C=3)
-
-    # Save specific range to file
-    capture_pane(pane, tail=50, n=True)  # first, check line numbers
-    capture_pane(pane, rel_range="30:10", save="/tmp/log.txt", append=False)
-
-    # Filter task output
-    task_output(task_id, grep="Episode", A=2, m=10)  # first 10 matches with 2 lines after
-
-==========
-5. ABORT/TIMEOUT DOES NOT MEAN "COMMAND NOT SENT" (CRITICAL)
-==========
-
-When xtcl/xpy/xsh returns abort or timeout, the command WAS ALREADY SENT.
-The error means "couldn't receive end marker", not "command failed to send".
-
-DANGER CASE: exit commands with blocking tool
-    xtcl(pane, "exit")  # WRONG: exit has no end marker, use peek!
-                        # Innovus terminates, now bash, no TCL prompt → abort
-    xtcl_peek(pane, "exit")  # WRONG: sends exit AGAIN to bash → logout!
-
-CORRECT: Use peek for exit commands (as documented in CASE C above)
-    xtcl_peek(pane, "exit")  # Right tool for exit
-
-IF YOU ALREADY MADE THE MISTAKE (used blocking tool for exit):
-    xtcl(pane, "exit")  # abort/timeout
-    capture_pane(pane)  # MUST check state before doing anything
-    # If bash ($), the exit worked. Don't send another exit.
-
-WHY: Blocking tools (xtcl/xpy/xsh) do two things:
-    1. Send command to tmux (always succeeds if pane exists)
-    2. Wait for end marker (can fail/timeout)
-
-Abort only affects step 2. Step 1 already happened.
-
-==========
-6. STATE TRACKING
-==========
-
-DO NOT call capture_pane before every command. Track pane state in your memory.
-
-State changes to remember:
-- xsh_peek(pane, "python3") → pane is now Python REPL (>>>)
-- xpy_peek(pane, "exit()") → pane is now bash ($)
-- xsh_peek(pane, "openroad") → pane is now TCL (%)
-- xtcl_peek(pane, "exit") → pane is now bash ($)
-- send_keys("C-c C-c") → uncertain, use capture_pane to confirm
-
-Only use capture_pane when:
-- First time accessing a pane in this conversation
-- After Ctrl+C interrupt (state is uncertain)
-- After abort/timeout from blocking tools (state is uncertain)
-- User explicitly asks to check pane state
-
-WRONG: capture_pane before every xpy/xsh call (wastes tokens)
-RIGHT: Remember "I started python3 earlier" → use xpy until I see exit
-
-==========
-7. CONVERSATION CONTINUITY (CRITICAL)
-==========
-
-Registered panes persist in MCP server memory across conversation compaction.
-If you get "Pane not registered" error after compaction:
-    1. Run get_working_panes() to see what's still registered
-    2. The pane info is NOT lost - it's in the server
-    3. Just use the registered panes shown
-
-If no panes are registered (new session or server restart):
-    1. Ask user which pane to use
-    2. Register with set_working_pane() before proceeding
-"""
+_INSTRUCTIONS_FILE = Path(__file__).parent / "instructions.txt"
+INSTRUCTIONS = _INSTRUCTIONS_FILE.read_text() if _INSTRUCTIONS_FILE.exists() else ""
 
 mcp = FastMCP("tmux-injector", instructions=INSTRUCTIONS)
 
@@ -482,6 +253,87 @@ def save_to_file(content: str, file_path: str, append: bool) -> str:
     return file_path
 
 
+def apply_output_filters(
+    lines: list[str],
+    grep: str = None,
+    v: str = None,
+    i: bool = False,
+    w: bool = False,
+    F: bool = False,
+    m: int = None,
+    A: int = None,
+    B: int = None,
+    C: int = None,
+    n: bool = False,
+    uniq: bool = True,
+    save: str = None,
+    append: bool = True,
+    n_negative: bool = False
+) -> str:
+    """Apply common output filters and optionally save to file.
+
+    Args:
+        lines: Input lines to filter
+        grep: Filter lines matching this regex pattern
+        v: Exclude lines matching this regex pattern (like grep -v)
+        i: Case insensitive matching (like grep -i)
+        w: Word match - pattern must match whole word (like grep -w)
+        F: Fixed string - treat pattern as literal, not regex (like grep -F)
+        m: Max count - return at most N matching lines (like grep -m)
+        A: Lines after grep match (like grep -A)
+        B: Lines before grep match (like grep -B)
+        C: Lines before and after grep match (like grep -C)
+        n: Show line numbers
+        uniq: Remove consecutive duplicate lines (like uniq, default: True)
+        save: File path to save output (optional)
+        append: If True, append to file (>>); if False, overwrite (>)
+        n_negative: If True, show negative line numbers (for capture_pane)
+
+    Returns:
+        Filtered output as string
+    """
+    # Build regex flags
+    flags = re.IGNORECASE if i else 0
+
+    # Apply grep filter with context (A/B/C)
+    if grep:
+        pat = re.escape(grep) if F else grep
+        pat = rf'\b{pat}\b' if w else pat
+        pattern = re.compile(pat, flags)
+        before = B if B is not None else (C or 0)
+        after = A if A is not None else (C or 0)
+        lines = apply_grep_with_context(lines, pattern, before, after)
+        if m is not None and m > 0:
+            lines = lines[:m]
+
+    # Apply exclude filter (grep -v)
+    if v:
+        pat_v = re.escape(v) if F else v
+        pat_v = rf'\b{pat_v}\b' if w else pat_v
+        exc_pattern = re.compile(pat_v, flags)
+        lines = [line for line in lines if not exc_pattern.search(line)]
+
+    # Apply uniq
+    if uniq:
+        lines = apply_dedupe(lines)
+
+    # Apply line numbers
+    if n:
+        if n_negative:
+            total = len(lines)
+            lines = [f"{idx - total}: {line}" for idx, line in enumerate(lines)]
+        else:
+            lines = [f"{idx}: {line}" for idx, line in enumerate(lines)]
+
+    result = '\n'.join(lines)
+
+    # Save to file if requested
+    if save:
+        save_to_file(result, save, append)
+
+    return result
+
+
 def check_task_output(session: str, begin: str, end: str) -> tuple[str, bool]:
     """Check current output for a task. Returns (output, is_complete)."""
     raw = run_tmux_cmd(["capture-pane", "-t", session, "-p", "-S", "-"])
@@ -532,7 +384,20 @@ async def xpy(
     pane: str,
     code: str = None,
     file: str = None,
-    timeout: float = 60.0
+    timeout: float = 60.0,
+    grep: str = None,
+    v: str = None,
+    i: bool = False,
+    w: bool = False,
+    F: bool = False,
+    m: int = None,
+    A: int = None,
+    B: int = None,
+    C: int = None,
+    n: bool = False,
+    uniq: bool = True,
+    save: str = None,
+    append: bool = True
 ) -> str:
     """Execute Python code in tmux (blocking). Waits for completion.
 
@@ -541,6 +406,19 @@ async def xpy(
         code: Python code to execute
         file: Python file to execute (alternative to code)
         timeout: Timeout in seconds (default: 60)
+        grep: Filter lines matching this regex pattern
+        v: Exclude lines matching this regex pattern (like grep -v)
+        i: Case insensitive matching (like grep -i)
+        w: Word match - pattern must match whole word (like grep -w)
+        F: Fixed string - treat pattern as literal, not regex (like grep -F)
+        m: Max count - return at most N matching lines (like grep -m)
+        A: Lines after grep match (like grep -A)
+        B: Lines before grep match (like grep -B)
+        C: Lines before and after grep match (like grep -C)
+        n: Show line numbers (like grep -n)
+        uniq: Remove consecutive duplicate lines (like uniq, default: True)
+        save: File path to save output (optional)
+        append: If True, append to file (>>); if False, overwrite (>)
     """
     check_pane_registered(pane)
 
@@ -566,19 +444,55 @@ async def xpy(
     try:
         begin, end = generate_marker()
         send_python_code(pane, code, begin, end)
-        return await capture_output_blocking(pane, begin, end, timeout)
+        output = await capture_output_blocking(pane, begin, end, timeout)
+        lines = output.split('\n') if output else []
+        return apply_output_filters(
+            lines, grep=grep, v=v, i=i, w=w, F=F, m=m,
+            A=A, B=B, C=C, n=n, uniq=uniq, save=save, append=append,
+            n_negative=False
+        )
     finally:
         lock.release()
 
 
 @mcp.tool()
-async def xtcl(pane: str, code: str, timeout: float = 60.0) -> str:
+async def xtcl(
+    pane: str,
+    code: str,
+    timeout: float = 60.0,
+    grep: str = None,
+    v: str = None,
+    i: bool = False,
+    w: bool = False,
+    F: bool = False,
+    m: int = None,
+    A: int = None,
+    B: int = None,
+    C: int = None,
+    n: bool = False,
+    uniq: bool = True,
+    save: str = None,
+    append: bool = True
+) -> str:
     """Execute TCL code in tmux (blocking). For EDA tools like Innovus, OpenROAD.
 
     Args:
         pane: Registered tmux pane (e.g., t1:1.0)
         code: TCL code to execute
         timeout: Timeout in seconds (default: 60)
+        grep: Filter lines matching this regex pattern
+        v: Exclude lines matching this regex pattern (like grep -v)
+        i: Case insensitive matching (like grep -i)
+        w: Word match - pattern must match whole word (like grep -w)
+        F: Fixed string - treat pattern as literal, not regex (like grep -F)
+        m: Max count - return at most N matching lines (like grep -m)
+        A: Lines after grep match (like grep -A)
+        B: Lines before grep match (like grep -B)
+        C: Lines before and after grep match (like grep -C)
+        n: Show line numbers (like grep -n)
+        uniq: Remove consecutive duplicate lines (like uniq, default: True)
+        save: File path to save output (optional)
+        append: If True, append to file (>>); if False, overwrite (>)
     """
     check_pane_registered(pane)
 
@@ -592,7 +506,13 @@ async def xtcl(pane: str, code: str, timeout: float = 60.0) -> str:
     try:
         begin, end = generate_marker()
         send_tcl_code(pane, code, begin, end)
-        return await capture_output_blocking(pane, begin, end, timeout)
+        output = await capture_output_blocking(pane, begin, end, timeout)
+        lines = output.split('\n') if output else []
+        return apply_output_filters(
+            lines, grep=grep, v=v, i=i, w=w, F=F, m=m,
+            A=A, B=B, C=C, n=n, uniq=uniq, save=save, append=append,
+            n_negative=False
+        )
     finally:
         lock.release()
 
@@ -602,7 +522,20 @@ async def xsh(
     pane: str,
     code: str = None,
     file: str = None,
-    timeout: float = 60.0
+    timeout: float = 60.0,
+    grep: str = None,
+    v: str = None,
+    i: bool = False,
+    w: bool = False,
+    F: bool = False,
+    m: int = None,
+    A: int = None,
+    B: int = None,
+    C: int = None,
+    n: bool = False,
+    uniq: bool = True,
+    save: str = None,
+    append: bool = True
 ) -> str:
     """Execute shell command in tmux (blocking). Waits for completion.
 
@@ -611,6 +544,19 @@ async def xsh(
         code: Shell command to execute
         file: Shell script file to execute (alternative to code)
         timeout: Timeout in seconds (default: 60)
+        grep: Filter lines matching this regex pattern
+        v: Exclude lines matching this regex pattern (like grep -v)
+        i: Case insensitive matching (like grep -i)
+        w: Word match - pattern must match whole word (like grep -w)
+        F: Fixed string - treat pattern as literal, not regex (like grep -F)
+        m: Max count - return at most N matching lines (like grep -m)
+        A: Lines after grep match (like grep -A)
+        B: Lines before grep match (like grep -B)
+        C: Lines before and after grep match (like grep -C)
+        n: Show line numbers (like grep -n)
+        uniq: Remove consecutive duplicate lines (like uniq, default: True)
+        save: File path to save output (optional)
+        append: If True, append to file (>>); if False, overwrite (>)
     """
     check_pane_registered(pane)
 
@@ -633,7 +579,13 @@ async def xsh(
     try:
         begin, end = generate_marker()
         send_shell_code(pane, code, begin, end)
-        return await capture_output_blocking(pane, begin, end, timeout)
+        output = await capture_output_blocking(pane, begin, end, timeout)
+        lines = output.split('\n') if output else []
+        return apply_output_filters(
+            lines, grep=grep, v=v, i=i, w=w, F=F, m=m,
+            A=A, B=B, C=C, n=n, uniq=uniq, save=save, append=append,
+            n_negative=False
+        )
     finally:
         lock.release()
 
@@ -871,42 +823,11 @@ def task_output(
     elif tail > 0 and len(all_lines) > tail:
         all_lines = all_lines[-tail:]
 
-    # Build regex flags
-    flags = re.IGNORECASE if i else 0
-
-    # Apply grep filter with context (A/B/C)
-    if grep:
-        pat = re.escape(grep) if F else grep
-        pat = rf'\b{pat}\b' if w else pat
-        pattern = re.compile(pat, flags)
-        before = B if B is not None else (C or 0)
-        after = A if A is not None else (C or 0)
-        all_lines = apply_grep_with_context(all_lines, pattern, before, after)
-        if m is not None and m > 0:
-            all_lines = all_lines[:m]
-
-    # Apply exclude filter (grep -v)
-    if v:
-        pat_v = re.escape(v) if F else v
-        pat_v = rf'\b{pat_v}\b' if w else pat_v
-        exc_pattern = re.compile(pat_v, flags)
-        all_lines = [line for line in all_lines if not exc_pattern.search(line)]
-
-    # Apply uniq
-    if uniq:
-        all_lines = apply_dedupe(all_lines)
-
-    # Apply line numbers (grep -n)
-    if n:
-        all_lines = [f"{i}: {line}" for i, line in enumerate(all_lines)]
-
-    result = '\n'.join(all_lines)
-
-    # Save to file if requested
-    if save:
-        save_to_file(result, save, append)
-
-    return result
+    return apply_output_filters(
+        all_lines, grep=grep, v=v, i=i, w=w, F=F, m=m,
+        A=A, B=B, C=C, n=n, uniq=uniq, save=save, append=append,
+        n_negative=False
+    )
 
 
 @mcp.tool()
@@ -1272,43 +1193,11 @@ def capture_pane(
     elif tail > 0 and len(all_lines) > tail:
         all_lines = all_lines[-tail:]
 
-    # Build regex flags
-    flags = re.IGNORECASE if i else 0
-
-    # Apply grep filter with context (A/B/C)
-    if grep:
-        pat = re.escape(grep) if F else grep
-        pat = rf'\b{pat}\b' if w else pat
-        pattern = re.compile(pat, flags)
-        before = B if B is not None else (C or 0)
-        after = A if A is not None else (C or 0)
-        all_lines = apply_grep_with_context(all_lines, pattern, before, after)
-        if m is not None and m > 0:
-            all_lines = all_lines[:m]
-
-    # Apply exclude filter (grep -v)
-    if v:
-        pat_v = re.escape(v) if F else v
-        pat_v = rf'\b{pat_v}\b' if w else pat_v
-        exc_pattern = re.compile(pat_v, flags)
-        all_lines = [line for line in all_lines if not exc_pattern.search(line)]
-
-    # Apply uniq
-    if uniq:
-        all_lines = apply_dedupe(all_lines)
-
-    # Apply line numbers (negative, from end)
-    if n:
-        total = len(all_lines)
-        all_lines = [f"{i - total}: {line}" for i, line in enumerate(all_lines)]
-
-    result = '\n'.join(all_lines)
-
-    # Save to file if requested
-    if save:
-        save_to_file(result, save, append)
-
-    return result
+    return apply_output_filters(
+        all_lines, grep=grep, v=v, i=i, w=w, F=F, m=m,
+        A=A, B=B, C=C, n=n, uniq=uniq, save=save, append=append,
+        n_negative=True
+    )
 
 
 @mcp.tool()
