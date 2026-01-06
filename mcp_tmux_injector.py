@@ -338,6 +338,7 @@ def apply_output_filters(
         eff_suffix = (suffix or '').replace('\\n', '\n').replace('\\t', '\t')
         save_content = eff_prefix + result + eff_suffix
         save_to_file(save_content, save, append)
+        return f"Saved to {save}"
 
     return result
 
