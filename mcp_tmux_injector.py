@@ -41,8 +41,9 @@ import os
 import re
 import threading
 import asyncio
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP, Context
 from pathlib import Path
+from urllib.parse import urlparse
 
 _INSTRUCTIONS_FILE = Path(__file__).parent / "instructions.txt"
 INSTRUCTIONS = _INSTRUCTIONS_FILE.read_text() if _INSTRUCTIONS_FILE.exists() else ""
@@ -59,6 +60,34 @@ _pane_locks_lock = threading.Lock()  # Lock for accessing _pane_locks dict
 # Registered working panes: pane -> description
 _working_panes: dict[str, str] = {}
 
+# Client cwd from roots/list (cached after first query)
+_client_cwd: str | None = None
+
+
+async def _get_client_cwd(ctx: Context) -> str | None:
+    """Get client's working directory via roots/list, with caching."""
+    global _client_cwd
+    if _client_cwd is not None:
+        return _client_cwd
+    try:
+        result = await ctx.session.list_roots()
+        if result.roots:
+            _client_cwd = urlparse(str(result.roots[0].uri)).path
+    except Exception:
+        pass
+    return _client_cwd
+
+
+def _resolve_file_path(file: str, client_cwd: str | None = None) -> str:
+    """Resolve file path using client's cwd for relative paths."""
+    expanded = os.path.expanduser(file)
+    if os.path.isabs(expanded):
+        return expanded
+    # Relative path: use client cwd if available
+    if client_cwd:
+        return os.path.join(client_cwd, expanded)
+    return os.path.abspath(expanded)
+
 
 def get_registered_panes_message() -> str:
     """Format registered panes for error message."""
@@ -73,12 +102,27 @@ def get_registered_panes_message() -> str:
 def check_pane_registered(pane: str) -> None:
     """Raise error if pane is not registered."""
     if pane not in _working_panes:
-        msg = f"""Pane '{pane}' is not registered.
+        if _working_panes:
+            # Registered panes exist - suggest using one of them
+            lines = [f"Pane '{pane}' is not registered.", ""]
+            lines.append("Available panes (use one of these):")
+            for p, desc in _working_panes.items():
+                lines.append(f"  {p}: {desc}")
+            lines.append("")
+            pane_names = list(_working_panes.keys())
+            if len(pane_names) == 1:
+                lines.append(f"Hint: Use '{pane_names[0]}' instead.")
+            else:
+                suggestions = "' or '".join(pane_names[:3])
+                lines.append(f"Hint: Did you mean '{suggestions}'?")
+            msg = '\n'.join(lines)
+        else:
+            # No panes registered - ask user
+            msg = f"""Pane '{pane}' is not registered.
 
-{get_registered_panes_message()}
+No panes registered.
 
 Context may have been lost due to compaction.
-Run get_working_panes() to check registered panes.
 Ask user for permission before registering with set_working_pane()."""
         raise ValueError(msg)
 
@@ -97,6 +141,25 @@ def is_pane_busy(pane: str) -> bool:
     if lock.locked():
         return True
     return False
+
+
+def acquire_pane_lock(pane: str) -> threading.Lock:
+    """Acquire pane lock. If busy, check if existing task completed first."""
+    lock = get_pane_lock(pane)
+    if lock.acquire(blocking=False):
+        return lock
+
+    # Check if existing task is actually completed
+    for task_id, task in _tasks.items():
+        if task['pane'] == pane and 'lock' in task:
+            _, completed = check_task_output(pane, task['begin'], task['end'])
+            if completed:
+                task['lock'].release()
+                del task['lock']
+                if lock.acquire(blocking=False):
+                    return lock
+
+    raise RuntimeError(f"Pane '{pane}' is busy with another task")
 
 
 def run_tmux_cmd(args: list[str], capture: bool = True) -> str:
@@ -126,11 +189,13 @@ def generate_marker() -> tuple[str, str]:
     return f"{marker}B_", f"{marker}E_"
 
 
-def generate_task_id() -> str:
-    """Generate unique task ID."""
+def generate_task_id_and_marker() -> tuple[str, str, str]:
+    """Generate unique task ID and matching markers (same ID for debugging)."""
     ts = format(int(time.time()), 'x')
     rnd = format(random.randint(0, 0xFFFF), 'x')
-    return f"T{ts}_{rnd}"
+    task_id = f"T{ts}_{rnd}"
+    marker = f"_X{ts}_{rnd}_"
+    return task_id, f"{marker}B_", f"{marker}E_"
 
 
 def send_python_code(session: str, code: str, begin: str, end: str) -> None:
@@ -157,6 +222,7 @@ def send_python_code(session: str, code: str, begin: str, end: str) -> None:
     exec_cmd = f"print('{begin}'); print(); exec('try:\\n{code_indented}\\nexcept: __import__(\\'traceback\\').print_exc()'); print(); print('{end}')"
     run_tmux_cmd(["send-keys", "-t", session, exec_cmd], capture=False)
     run_tmux_cmd(["send-keys", "-t", session, "Enter"], capture=False)
+    time.sleep(0.05)  # Ensure tmux processes Enter before next command
 
 
 def send_tcl_code(session: str, code: str, begin: str, end: str) -> None:
@@ -404,7 +470,8 @@ async def xpy(
     B: int = None,
     C: int = None,
     n: bool = False,
-    uniq: bool = True
+    uniq: bool = True,
+    ctx: Context = None
 ) -> str:
     """Execute Python code in tmux (blocking). Waits for completion.
 
@@ -431,7 +498,8 @@ async def xpy(
         raise ValueError(f"Pane '{pane}' not found in tmux")
 
     if file:
-        abs_path = os.path.abspath(os.path.expanduser(file))
+        client_cwd = await _get_client_cwd(ctx) if ctx else _client_cwd
+        abs_path = _resolve_file_path(file, client_cwd)
         if not os.path.isfile(abs_path):
             raise FileNotFoundError(f"File not found: {abs_path}")
         code = f"exec(open('{abs_path}').read())"
@@ -442,9 +510,7 @@ async def xpy(
     if "\\n" in code:
         raise ValueError("Code contains \\n which breaks tmux injection. Use print() for blank lines.")
 
-    lock = get_pane_lock(pane)
-    if not lock.acquire(blocking=False):
-        raise RuntimeError(f"Pane '{pane}' is busy with another task")
+    lock = acquire_pane_lock(pane)
 
     try:
         begin, end = generate_marker()
@@ -500,9 +566,7 @@ async def xtcl(
     if not check_session(pane):
         raise ValueError(f"Pane '{pane}' not found in tmux")
 
-    lock = get_pane_lock(pane)
-    if not lock.acquire(blocking=False):
-        raise RuntimeError(f"Pane '{pane}' is busy with another task")
+    lock = acquire_pane_lock(pane)
 
     try:
         begin, end = generate_marker()
@@ -534,7 +598,8 @@ async def xsh(
     B: int = None,
     C: int = None,
     n: bool = False,
-    uniq: bool = True
+    uniq: bool = True,
+    ctx: Context = None
 ) -> str:
     """Execute shell command in tmux (blocking). Waits for completion.
 
@@ -561,7 +626,8 @@ async def xsh(
         raise ValueError(f"Pane '{pane}' not found in tmux")
 
     if file:
-        abs_path = os.path.abspath(os.path.expanduser(file))
+        client_cwd = await _get_client_cwd(ctx) if ctx else _client_cwd
+        abs_path = _resolve_file_path(file, client_cwd)
         if not os.path.isfile(abs_path):
             raise FileNotFoundError(f"File not found: {abs_path}")
         code = f"source '{abs_path}'"
@@ -569,9 +635,7 @@ async def xsh(
     if not code:
         raise ValueError("Either 'code' or 'file' must be provided")
 
-    lock = get_pane_lock(pane)
-    if not lock.acquire(blocking=False):
-        raise RuntimeError(f"Pane '{pane}' is busy with another task")
+    lock = acquire_pane_lock(pane)
 
     try:
         begin, end = generate_marker()
@@ -592,10 +656,11 @@ async def xsh(
 # =============================================================================
 
 @mcp.tool()
-def xpy_start(
+async def xpy_start(
     pane: str,
     code: str = None,
-    file: str = None
+    file: str = None,
+    ctx: Context = None
 ) -> str:
     """Start Python code execution (non-blocking). Returns task_id immediately.
 
@@ -612,7 +677,8 @@ def xpy_start(
         raise ValueError(f"Pane '{pane}' not found in tmux")
 
     if file:
-        abs_path = os.path.abspath(os.path.expanduser(file))
+        client_cwd = await _get_client_cwd(ctx) if ctx else _client_cwd
+        abs_path = _resolve_file_path(file, client_cwd)
         if not os.path.isfile(abs_path):
             raise FileNotFoundError(f"File not found: {abs_path}")
         code = f"exec(open('{abs_path}').read())"
@@ -623,12 +689,9 @@ def xpy_start(
     if "\\n" in code:
         raise ValueError("Code contains \\n which breaks tmux injection. Use print() for blank lines.")
 
-    lock = get_pane_lock(pane)
-    if not lock.acquire(blocking=False):
-        raise RuntimeError(f"Pane '{pane}' is busy with another task")
+    lock = acquire_pane_lock(pane)
 
-    task_id = generate_task_id()
-    begin, end = generate_marker()
+    task_id, begin, end = generate_task_id_and_marker()
 
     send_python_code(pane, code, begin, end)
 
@@ -658,12 +721,9 @@ def xtcl_start(pane: str, code: str) -> str:
     if not check_session(pane):
         raise ValueError(f"Pane '{pane}' not found in tmux")
 
-    lock = get_pane_lock(pane)
-    if not lock.acquire(blocking=False):
-        raise RuntimeError(f"Pane '{pane}' is busy with another task")
+    lock = acquire_pane_lock(pane)
 
-    task_id = generate_task_id()
-    begin, end = generate_marker()
+    task_id, begin, end = generate_task_id_and_marker()
 
     send_tcl_code(pane, code, begin, end)
 
@@ -681,10 +741,11 @@ def xtcl_start(pane: str, code: str) -> str:
 
 
 @mcp.tool()
-def xsh_start(
+async def xsh_start(
     pane: str,
     code: str = None,
-    file: str = None
+    file: str = None,
+    ctx: Context = None
 ) -> str:
     """Start shell command execution (non-blocking). Returns task_id immediately.
 
@@ -701,7 +762,8 @@ def xsh_start(
         raise ValueError(f"Pane '{pane}' not found in tmux")
 
     if file:
-        abs_path = os.path.abspath(os.path.expanduser(file))
+        client_cwd = await _get_client_cwd(ctx) if ctx else _client_cwd
+        abs_path = _resolve_file_path(file, client_cwd)
         if not os.path.isfile(abs_path):
             raise FileNotFoundError(f"File not found: {abs_path}")
         code = f"source '{abs_path}'"
@@ -709,12 +771,9 @@ def xsh_start(
     if not code:
         raise ValueError("Either 'code' or 'file' must be provided")
 
-    lock = get_pane_lock(pane)
-    if not lock.acquire(blocking=False):
-        raise RuntimeError(f"Pane '{pane}' is busy with another task")
+    lock = acquire_pane_lock(pane)
 
-    task_id = generate_task_id()
-    begin, end = generate_marker()
+    task_id, begin, end = generate_task_id_and_marker()
 
     send_shell_code(pane, code, begin, end)
 
@@ -864,17 +923,8 @@ def task_output(
     )
 
 
-@mcp.tool()
-async def task_wait(task_id: str, timeout: float = 60.0) -> str:
-    """Wait for task completion (blocking). Returns status only.
-
-    Args:
-        task_id: Task ID from xpy_start, xtcl_start, or xsh_start
-        timeout: Max wait time in seconds
-    """
-    if task_id not in _tasks:
-        raise ValueError(f"Task '{task_id}' not found")
-
+async def _wait_single_task(task_id: str, timeout: float) -> str:
+    """Wait for a single task to complete. Returns status string."""
     task = _tasks[task_id]
     start_time = time.time()
 
@@ -882,14 +932,63 @@ async def task_wait(task_id: str, timeout: float = 60.0) -> str:
         await asyncio.sleep(0.1)
         _, completed = check_task_output(task["pane"], task["begin"], task["end"])
         if completed:
-            # Release lock
             if "lock" in task:
                 task["lock"].release()
                 del task["lock"]
             elapsed = time.time() - task["start_time"]
             return f"[completed] {elapsed:.1f}s"
 
-    raise TimeoutError(f"Task did not complete within {timeout}s")
+    return f"[timeout] {timeout}s"
+
+
+@mcp.tool()
+async def task_wait(task_id: str = None, task_ids: list[str] = None, timeout: float = 60.0, race: bool = False) -> str:
+    """Wait for task completion (blocking). Returns status only.
+
+    Args:
+        task_id: Single task ID (mutually exclusive with task_ids)
+        task_ids: Multiple task IDs to wait simultaneously (mutually exclusive with task_id)
+        timeout: Max wait time in seconds
+        race: If True with task_ids, return when ANY task completes (default: wait for ALL)
+    """
+    if (task_id is None) == (task_ids is None):
+        raise ValueError("Exactly one of task_id or task_ids must be specified")
+
+    if task_id is not None:
+        if task_id not in _tasks:
+            raise ValueError(f"Task '{task_id}' not found")
+        result = await _wait_single_task(task_id, timeout)
+        if result.startswith("[timeout]"):
+            raise TimeoutError(f"Task did not complete within {timeout}s")
+        return result
+
+    not_found = [tid for tid in task_ids if tid not in _tasks]
+    if not_found:
+        raise ValueError(f"Tasks not found: {', '.join(not_found)}")
+
+    if race:
+        async_tasks = {}
+        for tid in task_ids:
+            async_tasks[asyncio.create_task(_wait_single_task(tid, timeout))] = tid
+
+        done, pending = await asyncio.wait(async_tasks.keys(), return_when=asyncio.FIRST_COMPLETED)
+
+        for t in pending:
+            t.cancel()
+
+        lines = []
+        for t in done:
+            tid = async_tasks[t]
+            lines.append(f"{tid}: {t.result()}")
+        for t in pending:
+            tid = async_tasks[t]
+            elapsed = time.time() - _tasks[tid]["start_time"]
+            lines.append(f"{tid}: [running] {elapsed:.1f}s")
+
+        return '\n'.join(lines)
+
+    results = await asyncio.gather(*[_wait_single_task(tid, timeout) for tid in task_ids])
+    return '\n'.join(f"{tid}: {res}" for tid, res in zip(task_ids, results))
 
 
 @mcp.tool()
@@ -991,6 +1090,21 @@ def remove_working_pane(pane: str) -> str:
     return f"Removed: {pane}"
 
 
+@mcp.tool()
+def update_pane_description(pane: str, description: str) -> str:
+    """Update the description of a registered pane.
+
+    Args:
+        pane: Registered pane name
+        description: New description
+    """
+    if pane not in _working_panes:
+        raise ValueError(f"Pane '{pane}' is not registered")
+
+    _working_panes[pane] = description
+    return f"Updated: {pane} ({description})"
+
+
 async def peek_output(pane: str, begin: str, wait: float) -> str:
     """Wait and capture output after begin marker."""
     await asyncio.sleep(wait)
@@ -1028,9 +1142,7 @@ async def xpy_peek(
     if not check_session(pane):
         raise ValueError(f"Pane '{pane}' not found in tmux")
 
-    lock = get_pane_lock(pane)
-    if not lock.acquire(blocking=False):
-        raise RuntimeError(f"Pane '{pane}' is busy with another task")
+    lock = acquire_pane_lock(pane)
 
     try:
         begin, _ = generate_marker()
@@ -1066,9 +1178,7 @@ async def xtcl_peek(
     if not check_session(pane):
         raise ValueError(f"Pane '{pane}' not found in tmux")
 
-    lock = get_pane_lock(pane)
-    if not lock.acquire(blocking=False):
-        raise RuntimeError(f"Pane '{pane}' is busy with another task")
+    lock = acquire_pane_lock(pane)
 
     try:
         begin, _ = generate_marker()
@@ -1102,9 +1212,7 @@ async def xsh_peek(
     if not check_session(pane):
         raise ValueError(f"Pane '{pane}' not found in tmux")
 
-    lock = get_pane_lock(pane)
-    if not lock.acquire(blocking=False):
-        raise RuntimeError(f"Pane '{pane}' is busy with another task")
+    lock = acquire_pane_lock(pane)
 
     try:
         begin, _ = generate_marker()
