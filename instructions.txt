@@ -1,98 +1,25 @@
 This describes how you use tmux-injector tools. This is how the system works.
 
 ==========
-QUICK REFERENCE: TOOL SELECTION
+1. TOOL SELECTION
 ==========
 
-┌─ What do you want to do?
-│
-├─ Start interpreter (python3, openroad, etc.)
+┌─ Start interpreter (python3, openroad, etc.)
 │   └─→ xsh_peek / xpy_peek / xtcl_peek
 │       (no end marker, wait=1~2 seconds)
 │
 ├─ Run short command (wait for completion)
-│   └─→ xsh / xpy / xtcl
-│       (blocking, has end marker)
+│   └─→ xsh / xpy / xtcl (blocking)
 │
-├─ Run long task (wait for completion, need monitoring)
-│   └─→ xsh_start / xpy_start / xtcl_start
-│       (non-blocking, get task_id then task_wait/task_output)
+├─ Run long task (need monitoring)
+│   └─→ xsh_start / xpy_start / xtcl_start (non-blocking)
+│       then task_status / task_output / task_wait
 │
 ├─ Respond to prompt (password, yes/no)
 │   └─→ send_text
 │
-├─ Send special keys (Ctrl+C, arrows)
-│   └─→ send_keys
-│
 └─ Check current screen
     └─→ capture_pane
-
-Parallel execution?
-  → Has end marker: xsh_start/xpy_start/xtcl_start
-  → No end marker: peek (interpreter startup, etc.)
-
-==========
-1. TOOL SELECTION
-==========
-
-## Decision Tree
-
-1. **Interpreter 시작?** (python3, openroad, tcl shell)
-   → peek 도구 사용
-   - End marker 생성 안 됨
-   - 병렬/순차 무관
-   - xsh_peek, xpy_peek, xtcl_peek
-
-2. **명령 실행 - 완료 기다릴까?**
-   YES → blocking 도구
-     - xsh(pane, "ls -la")
-     - xpy(pane, "print('hello')")
-     - xtcl(pane, "puts 'hello'")
-
-   NO → non-blocking 도구
-     - xsh_start → task_id
-     - xpy_start → task_id
-     - xtcl_start → task_id
-     - 이후 task_status/task_output/task_wait
-
-3. **프롬프트 응답?** (password 입력 등)
-   → send_text(pane, "password")
-
-4. **특수 키?** (Ctrl+C, arrows)
-   → send_keys(pane, "C-c C-c C-c")
-
-5. **현재 화면 확인?**
-   → capture_pane(pane, tail=30)
-
-## Detailed Explanation by Case
-
-The pane has a current state: bash prompt ($), Python REPL (>>>), TCL interpreter (%), or running process.
-The tool you use depends on this state and what you want to do.
-
-CASE A: Short command that completes and returns to prompt
-Tool: xsh, xpy, or xtcl (blocking)
-Example: xsh(pane, "ls -la") → waits for completion, returns output
-Example: xpy(pane, file="script.py") → runs script file, waits for completion
-         file= converts to: exec(open('/absolute/path/script.py').read())
-
-CASE B: Long-running task that eventually completes
-Tool: xsh_start, xpy_start, or xtcl_start (non-blocking)
-Then: task_status(task_id) for status, task_output(task_id) for output, task_wait(task_id) to block
-Example: xsh_start(pane, "make build") → returns task_id immediately
-
-CASE C: Starting a process or interpreter (no end marker expected)
-Tool: xsh_peek, xpy_peek, or xtcl_peek
-Example: xsh_peek(pane, "python3", wait=1) → starts Python, captures prompt
-Example: xsh_peek(pane, "openroad -python train.py", wait=2) → starts long process, captures initial output
-Example: xpy_peek(pane, "exit()", wait=1) → exits interpreter (no end marker)
-
-CASE D: Responding to a prompt (password, yes/no)
-Tool: send_text
-Example: send_text(pane, "mypassword") → sends password, presses Enter
-
-CASE E: Sending special keys (Ctrl+C, arrows, Escape)
-Tool: send_keys
-Example: send_keys(pane, "C-c C-c C-c") → sends Ctrl+C three times
 
 ==========
 2. COMMON PATTERNS
@@ -106,343 +33,83 @@ Starting an interpreter and running code:
 Starting a long-running script (with monitoring):
     xsh_peek(pane, "python3", wait=1)      # start interpreter
     xpy_start(pane, file="train.py")       # returns task_id
-    task_status(task_id)                   # "[running] 30s" - quick status check
-    task_output(task_id, tail=10)          # last 10 lines of output
-    task_output(task_id, grep="Episode")   # filter for Episode lines
+    task_status(task_id)                   # quick status check
+    task_output(task_id, tail=10)          # last 10 lines
     task_wait(task_id, timeout=300)        # block until complete
-    # file= parameter converts to: exec(open('/absolute/path/train.py').read())
 
-Waiting for multiple tasks simultaneously:
+Waiting for multiple tasks:
     tid1 = xsh_start(pane1, "make build")
     tid2 = xsh_start(pane2, "make test")
-    task_wait(task_ids=[tid1, tid2], timeout=300)  # blocks until all complete
-    # Returns: "T123_abc: [completed] 5.3s\nT456_def: [completed] 8.1s"
-    # If some timeout: "[timeout] 300s" for those, others normal
+    task_wait(task_ids=[tid1, tid2], timeout=300)
 
-Waiting for first completion (race mode):
-    tid1 = xpy_start(pane1, file="train_a.py")
-    tid2 = xpy_start(pane2, file="train_b.py")
-    tid3 = xpy_start(pane3, file="train_c.py")
+Race mode (return on first completion):
     task_wait(task_ids=[tid1, tid2, tid3], race=True, timeout=600)
-    # Returns as soon as ANY task completes:
-    # "T123_abc: [completed] 45.2s\nT456_def: [running] 45.2s\nT789_ghi: [running] 45.2s"
-    # Remaining tasks continue running in tmux (not cancelled)
 
-Starting a long-running process (without monitoring):
-    xsh_peek(pane, "python3 train.py", wait=2)  # no task_id
-    capture_pane(pane, tail=30)                 # manual check only
+Without monitoring (no task_id):
+    xsh_peek(pane, "python3 train.py", wait=2)
+    capture_pane(pane, tail=30)
 
 SSH connection:
-    xsh_peek(pane, "ssh user@host", wait=2)  # connect
-    send_text(pane, "password")              # if password prompt appears
-    capture_pane(pane)                       # verify login
-    xsh(pane, "hostname")                    # run commands
-    xsh_peek(pane, "exit", wait=1)           # disconnect
-
-Interrupting a process:
-    send_keys(pane, "C-c C-c C-c")         # Ctrl+C multiple times
-    capture_pane(pane)                      # verify interrupted
+    xsh_peek(pane, "ssh user@host", wait=2)
+    send_text(pane, "password")
+    capture_pane(pane)
+    xsh(pane, "hostname")
+    xsh_peek(pane, "exit", wait=1)
 
 Passing variables from REPL to script (globals trick):
-    # In REPL, define variables before running script:
     xpy(pane, "model_path = '/path/to/model'")
-    xpy(pane, "learning_rate = 0.001")
-    xpy_start(pane, file="train.py")       # script can access these variables
-
-    # In train.py, use globals().get() to read REPL variables with defaults:
-    # model_path = globals().get('model_path', None)
-    # learning_rate = globals().get('learning_rate', 0.01)
-    # if model_path: agent.load(model_path)
-
-    # This works because file= uses exec() which shares REPL's globals()
+    xpy_start(pane, file="train.py")       # script accesses via globals().get('model_path', None)
+    # file= uses exec() which shares REPL's globals()
 
 ==========
 3. PANE REGISTRATION (REQUIRED)
 ==========
 
-Panes are registered before use. This prevents accidents after conversation compaction.
+Panes must be registered before use.
 
-Register a pane:
-    set_working_pane("t1:1.0", "OpenROAD Python REPL")
-    set_working_pane("t1:1.1", "bash for git")
+    set_working_pane("t1:1.0", "description")
+    get_working_panes()
 
-Check registered panes:
-    get_working_panes()  # Shows all registered panes with descriptions
-
-Remove a pane:
-    remove_working_pane("t1:1.1")
-
-When "Pane not registered" error occurs:
-    1. Context may have been lost due to compaction
-    2. get_working_panes() shows what is registered
-    3. User permission is obtained before registering new panes
+"Pane not registered" error → get_working_panes() first, then re-register if needed.
 
 ==========
-4. OUTPUT FILTERING
+4. CODE LIMITATIONS
 ==========
 
-Filtering parameters (grep-style):
+Literal \n in code breaks tmux injection (\n becomes Enter key).
+    Forbidden: xpy(pane, "result.split('\n')")
+    Use: splitlines(), chr(10), print()
 
-    grep: Filter lines matching this regex pattern
-    v: Exclude lines matching this regex pattern (like grep -v)
-    i: Case insensitive matching (like grep -i)
-    w: Word match - pattern must match whole word (like grep -w)
-    F: Fixed string - treat pattern as literal, not regex (like grep -F)
-    m: Max count - return at most N matching lines (like grep -m)
-    A: Lines after grep match (like grep -A)
-    B: Lines before grep match (like grep -B)
-    C: Lines before and after grep match (like grep -C)
-    n: Show line numbers (like grep -n)
-    uniq: Remove consecutive duplicate lines (like uniq, default: True)
+All tools use exec(). Bare expressions produce no output. file= also uses exec().
+    xpy(pane, "x") → empty. Use print(x).
 
-File save parameters (capture_pane, task_output ONLY):
+Do not use import/reload in REPL. Use file= instead.
+    xpy(pane, file="/path/to/module.py")
 
-    save: File path to save output
-    append: If True, append to file (>>); if False, overwrite (>)
-    prefix: Text to prepend before output (when saving)
-    suffix: Text to append after output (when saving)
-
-    save/append is not supported by blocking tools (xpy, xtcl, xsh).
-    The non-blocking workflow is used instead (see section 7).
-
-task_output specific (additional):
-    include_command: If True, prepend command to output (when saving)
-    command_prefix: Prefix for include_command (default: "$ "). E.g., "pt_shell> ", ">>> "
-    markdown: If True, wrap output in ```lang ... ``` code block (when saving)
-              lang is auto-determined from task type:
-              - xpy_start → ```python
-              - xtcl_start → ```tcl
-              - xsh_start → ```shell
-              No need to manually add ```tcl or ```python in prefix.
-    tail: If > 0, return only the last N lines (default: 0 = all)
-    head: If provided, return only the first N lines
-    range: Line range, e.g., "10:20" (0-indexed, within marker output)
-
-capture_pane specific:
-    tail: Number of lines to capture from end (default: 5)
-    rel_range: Relative range from end, e.g., "100:50" (100th from end to 50th from end)
-    since_marker: Only capture lines after this marker
-    n: Show line numbers as NEGATIVE indices from end (e.g., -5, -4, -3, -2, -1)
-       Different from task_output's n which shows positive indices.
-
-==========
-5. CODE LIMITATIONS
-==========
-
-## 5.1. CODE STRING LIMITATIONS
-
-Code is sent via tmux send-keys. Literal \n in code strings breaks injection.
-tmux interprets \n as actual Enter key, causing code to be split mid-execution.
-
-Forbidden:
-    xpy(pane, "result.split('\n')")     # \n interpreted as Enter
-
-Alternatives:
-    xpy(pane, "result.splitlines()")    # Same functionality, no \n
-    xpy(pane, 'chr(10)')                # Newline character without literal \n
-
-For blank line output:
-    print()                              # Use print() instead of \n
-
-## 5.2. EXPRESSION OUTPUT LIMITATION
-
-xpy/xtcl execute code inside exec(). Bare expressions produce no output.
-
-    >>> x = 5
-    >>> x          # REPL direct: outputs 5
-    5
-    >>> exec('x')  # exec(): no output (this is how xpy works)
-    >>>
-
-xpy(pane, "x") returns empty output. This is normal, not broken.
-
-To see variable values:
-    xpy(pane, "print(x)")        # explicit print required
-    xpy(pane, "print(repr(x))")  # for repr output
-
-Empty output from bare variable/expression is not an error.
-"Broken" or "not working" is not diagnosed for this case.
-
-## 5.3. MODULE RELOAD IN REPL
-
-When reflecting modified .py files in REPL:
-
-Wrong (import/reload):
-    xpy(pane, "from importlib import reload")
-    xpy(pane, "import mymodule; reload(mymodule)")
-    # ModuleNotFoundError - sys.path issue
-    # Requires path setup, cumbersome
-
-Correct (file=):
-    xpy(pane, file="/absolute/path/mymodule.py")
-    # Executes via exec(open(...).read())
-    # Functions/classes defined directly in globals
-    # No path issues, immediate reflection
-
-Use file= for:
-    - Reflecting changes to training_utils.py
-    - Frequently modified utility files
-    - Projects with complex import paths
-
-Do not use import/reload. Use file= only.
-
-## 5.4. MULTI-LINE CODE AND COMPOUND STATEMENTS
-
-Compound statements (for, if, while, def, class, with, try) require triple-quoted strings.
-Semicolons only work for simple statements (assignments, function calls).
-
-Forbidden - compound statements with semicolons:
-    xpy(pane, "for x in range(10): print(x)")              # SyntaxError
-    xpy(pane, "block = env.design.getBlock(); for inst in block.getInsts(): print(inst)")  # SyntaxError
-    xtcl(pane, "set x 5; foreach item $list { puts $item }")  # Broken
-
-Forbidden - \n for multi-line code:
-    xpy(pane, "for x in range(3):\n    print(x)")          # Indentation lost
-
-Correct - use triple-quoted strings:
+Compound statements (for/if/while/def/class/with/try) require triple-quoted strings.
+Semicolons work only for simple statements.
     xpy(pane, """
     for x in range(10):
         print(x)
     """)
 
-    xpy(pane, """
-    block = env.design.getBlock()
-    count = 0
-    for inst in block.getInsts():
-        count += 1
-    print(count)
-    """)
-
-Simple statements only - semicolons OK:
-    xpy(pane, "x = 5; y = 10; print(x + y)")              # OK (no compound statements)
-
-Why triple-quoted strings work:
-    - Preserves indentation (required for Python)
-    - Preserves multi-line structure
-    - tmux send-keys handles them correctly
-
-Python semicolon limitation:
-    Simple statements: x = 5; print(x)                     # Valid Python
-    Compound statements: for x in list: print(x)           # Invalid Python (missing newline/block)
-
-This is Python syntax, not a tmux limitation.
-Always use triple-quoted strings for any code with for/if/while/def/class/with/try.
-
 ==========
-6. WHAT EACH TOOL RETURNS
+5. FILE SAVE WORKFLOW
 ==========
 
-set_working_pane: "Registered: t1:1.0 (description)"
-get_working_panes: List of registered panes with descriptions
-remove_working_pane: "Removed: t1:1.0"
-xsh/xpy/xtcl: Command output (waits for completion)
-xsh_start/xpy_start/xtcl_start: Task ID string (stores command and type)
-xsh_peek/xpy_peek/xtcl_peek: Output captured after wait seconds
-task_status: "[running] Xs" or "[completed] Xs" (status only, lightweight)
-task_output: Current output (tail=N for last N lines, grep="pattern" for filtering)
-task_wait: "[completed] Xs" (blocks until done). Supports task_ids=[...] for multiple tasks, race=True for first-completion
-task_list: Shows task_id, type, status, elapsed, command preview
-           e.g., "T123abc [tcl] [running] 30s  \"estimate_eco -type...\"
-task_cancel: Cancels/forgets a background task (tmux execution is not stopped)
-task_cancel_all: Cancels all running background tasks
-tmux_sessions: Lists available tmux sessions
-send_text: "Text sent"
-send_keys: "Keys sent"
-capture_pane: Current pane content (last N lines)
+task_output supports saving to file. Verify output before saving:
 
-==========
-7. FILE SAVE WORKFLOW
-==========
-
-Command output is saved to a file using the non-blocking workflow:
-
-    1. xtcl_start(pane, "command")        # returns task_id
-    2. task_wait(task_id)                 # wait for completion
-    3. task_output(task_id)               # verify output is correct
-    4. task_output(task_id, save="...", append=True)  # save after verification
-
-This allows verification that the command succeeded before saving.
-Blocking tools do not support save because verification before saving is not possible.
-
-Example - save estimate_eco output to report:
-    task_id = xtcl_start(pane, "estimate_eco -type size_cell $cell")
-    task_wait(task_id)
-    task_output(task_id)  # check output looks correct
-    task_output(task_id, save="/tmp/report.md", append=True)
-
-Example - save with command included (markdown format):
-    task_id = xtcl_start(pane, "estimate_eco -type size_cell $cell")
-    task_wait(task_id)
-    task_output(task_id)  # verify
-    task_output(task_id, save="/tmp/report.md", append=True,
-                include_command=True, markdown=True,
-                prefix="### estimate_eco 결과\n\n", suffix="\n")
-    # Saves:
-    # ### estimate_eco 결과
-    #
-    # ```tcl
-    # $ estimate_eco -type size_cell $cell
-    # (output lines...)
-    # ```
-
-Example - save with filtering:
     task_id = xtcl_start(pane, "report_timing")
     task_wait(task_id)
-    task_output(task_id, grep="slack")  # verify filtered output
-    task_output(task_id, grep="slack", save="/tmp/report.md", append=True,
-                include_command=True, markdown=True, command_prefix="pt_shell> ",
-                prefix="### Timing Report\n\n", suffix="\n\n")
-
-Code fences are handled by markdown=True. Manual insertion of ``` in prefix/suffix is unnecessary.
-
-Example - building a report with multiple appends:
-    # First command
-    task_id = xtcl_start(pane, "report_timing -max_paths 5")
-    task_wait(task_id)
+    task_output(task_id)                                    # verify
     task_output(task_id, save="/tmp/report.md", append=True,
-                include_command=True, markdown=True, command_prefix="pt_shell> ",
-                prefix="## Timing Report\n\n", suffix="\n\n---\n\n")
+                include_command=True, markdown=True,
+                prefix="## Timing\n\n", suffix="\n\n")
 
-    # Second command
-    task_id = xtcl_start(pane, "report_power")
-    task_wait(task_id)
-    task_output(task_id, save="/tmp/report.md", append=True,
-                include_command=True, markdown=True, command_prefix="pt_shell> ",
-                prefix="## Power Report\n\n", suffix="\n\n---\n\n")
-
-    # Result in /tmp/report.md:
-    # ## Timing Report
-    #
-    # ```tcl
-    # pt_shell> report_timing -max_paths 5
-    # (timing output...)
-    # ```
-    #
-    # ---
-    #
-    # ## Power Report
-    #
-    # ```tcl
-    # pt_shell> report_power
-    # (power output...)
-    # ```
-    #
-    # ---
+markdown=True auto-wraps in code fences with lang from task type.
 
 ==========
-8. CHECKING PANE STATE
-==========
-
-The correct tool is determined by checking what is running in the pane.
-Tool: capture_pane(pane, tail=5)
-
-"$" or bash prompt → xsh variants are used
-">>>" or Python prompt → xpy variants are used
-"%" or TCL prompt → xtcl variants are used
-If running output is shown: capture_pane monitors progress, send_keys("C-c") interrupts
-
-==========
-9. STATE TRACKING
+6. STATE TRACKING
 ==========
 
 Pane state is tracked in memory. capture_pane is not called before every command.
@@ -452,53 +119,30 @@ State changes to remember:
 - xpy_peek(pane, "exit()") → pane is now bash ($)
 - xsh_peek(pane, "openroad") → pane is now TCL (%)
 - xtcl_peek(pane, "exit") → pane is now bash ($)
-- send_keys("C-c C-c") → uncertain, capture_pane is used to confirm
+- send_keys("C-c C-c") → uncertain, capture_pane to confirm
 
 capture_pane is used when:
 - First time accessing a pane in this conversation
-- After Ctrl+C interrupt (state is uncertain)
-- After abort/timeout from blocking tools (state is uncertain)
-- User explicitly asks to check pane state
-
-Example: "python3 was started earlier" is remembered → xpy is used until exit is observed.
+- After Ctrl+C interrupt (state uncertain)
+- After abort/timeout from blocking tools (use task_list to find converted task)
 
 ==========
-10. ABORT/TIMEOUT BEHAVIOR
+7. ABORT/TIMEOUT BEHAVIOR
 ==========
 
-When xtcl/xpy/xsh returns abort or timeout, the command was already sent.
-The error means "end marker was not received", not "command failed to send".
+Abort/timeout means "end marker not received", not "command not sent".
+The command was already sent to tmux. Do not resend.
 
-Blocking tools (xtcl/xpy/xsh) perform two steps:
-    1. Send command to tmux (always succeeds if pane exists)
-    2. Wait for end marker (can fail/timeout)
+Blocking tools auto-convert to background task on timeout or cancellation.
+After abort/timeout: task_list() to find the converted task, then task_wait/task_output.
 
-Abort only affects step 2. Step 1 already happened.
-
-Exit commands and blocking tools:
-    Exit commands produce no end marker because the interpreter terminates.
-    peek tools are used for exit commands (as documented in CASE C above).
-
-    xtcl_peek(pane, "exit", wait=1)  # Correct: exits interpreter, captures result
-
-After abort/timeout from blocking tools:
-    The pane state is uncertain. capture_pane is used to check what happened.
-
-    xtcl(pane, "exit")  # abort/timeout occurred
-    capture_pane(pane)  # check state before next action
-    # If "$" prompt is shown, the exit succeeded. Another exit is not sent.
+Exit commands produce no end marker. Use peek for exit:
+    xtcl_peek(pane, "exit", wait=1)
 
 ==========
-11. CONVERSATION CONTINUITY
+8. CONVERSATION CONTINUITY
 ==========
 
 Registered panes persist in MCP server memory across conversation compaction.
-
-When "Pane not registered" error occurs after compaction:
-    1. get_working_panes() shows what is still registered
-    2. The pane info is not lost - it remains in the server
-    3. The registered panes shown are used directly
-
-When no panes are registered (new session or server restart):
-    1. User is asked which pane to use
-    2. set_working_pane() is called before proceeding
+After compaction: get_working_panes() to check what is registered.
+New session or server restart: ask user which pane to use.

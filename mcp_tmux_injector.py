@@ -45,6 +45,12 @@ from mcp.server.fastmcp import FastMCP, Context
 from pathlib import Path
 from urllib.parse import urlparse
 
+# tqdm progress bar detection patterns
+_TQDM_INDICATOR = re.compile(r'\d+%\|')
+_TQDM_FRAC = re.compile(r'\|\s*\d+/\d+')
+_TQDM_SPEED = re.compile(r'(?:it|s)/(?:s|it)[\]\s]')
+_TQDM_BLOCK_ONLY = re.compile(r'^[\s█▏▎▍▌▋▊▉]+$')
+
 _INSTRUCTIONS_FILE = Path(__file__).parent / "instructions.txt"
 INSTRUCTIONS = _INSTRUCTIONS_FILE.read_text() if _INSTRUCTIONS_FILE.exists() else ""
 
@@ -282,6 +288,65 @@ def parse_rel_range(rel_range: str) -> tuple[int, int]:
     return start, end
 
 
+def _is_tqdm_line(line: str) -> bool:
+    """Check if a line is part of tqdm progress output."""
+    if _TQDM_INDICATOR.search(line):
+        return True
+    if _TQDM_FRAC.search(line):
+        return True
+    if _TQDM_SPEED.search(line):
+        return True
+    if line.strip() and _TQDM_BLOCK_ONLY.match(line):
+        return True
+    return False
+
+
+def _trim_tqdm_group(lines: list[str], start: int, end: int) -> tuple[int, int]:
+    """Find the last progress update within a tqdm group.
+
+    In narrow panes, each tqdm update wraps across multiple lines.
+    Only the final update (e.g., 100%) matters.
+    A new update starts at a line matching _TQDM_INDICATOR (\\d+%\\|).
+    """
+    last_update_start = start
+    for idx in range(start, end):
+        if _TQDM_INDICATOR.search(lines[idx]):
+            last_update_start = idx
+    return last_update_start, end
+
+
+def _filter_tqdm(lines: list[str]) -> list[str]:
+    """Remove tqdm progress lines, keeping only the final state of the last group."""
+    is_tqdm = [_is_tqdm_line(line) for line in lines]
+
+    # Find consecutive tqdm groups
+    groups = []  # [(start, end), ...]
+    group_start = None
+    for idx, flag in enumerate(is_tqdm):
+        if flag and group_start is None:
+            group_start = idx
+        elif not flag and group_start is not None:
+            groups.append((group_start, idx))
+            group_start = None
+    if group_start is not None:
+        groups.append((group_start, len(lines)))
+
+    if not groups:
+        return lines
+
+    # Remove all tqdm groups except the last
+    remove = set()
+    for start, end in groups[:-1]:
+        remove.update(range(start, end))
+
+    # Trim last group to final progress update only
+    last_start, last_end = groups[-1]
+    trim_start, trim_end = _trim_tqdm_group(lines, last_start, last_end)
+    remove.update(range(last_start, trim_start))
+
+    return [line for idx, line in enumerate(lines) if idx not in remove]
+
+
 def apply_dedupe(lines: list[str]) -> list[str]:
     """Remove consecutive duplicate lines."""
     if not lines:
@@ -319,6 +384,37 @@ def save_to_file(content: str, file_path: str, append: bool) -> str:
     return file_path
 
 
+def _resolve_panes(pane: str | None, panes: list[str] | None) -> list[str] | None:
+    """Resolve pane/panes params. Returns None for single mode, list for multi mode."""
+    if pane is not None and panes is not None:
+        raise ValueError("Use 'pane' or 'panes', not both")
+    if panes is not None:
+        if not panes:
+            raise ValueError("'panes' list is empty")
+        for p in panes:
+            check_pane_registered(p)
+        return panes
+    return None
+
+
+def _format_multi_result(results: dict[str, str]) -> str:
+    """Format multi-pane results, grouping panes with identical output."""
+    groups: dict[str, list[str]] = {}
+    order: list[str] = []
+    for pane, output in results.items():
+        if output not in groups:
+            groups[output] = []
+            order.append(output)
+        groups[output].append(pane)
+
+    parts = []
+    for output in order:
+        header = "[" + ", ".join(groups[output]) + "]"
+        parts.append(f"{header}\n{output}")
+
+    return "\n\n".join(parts)
+
+
 def apply_output_filters(
     lines: list[str],
     grep: str = None,
@@ -336,7 +432,8 @@ def apply_output_filters(
     append: bool = True,
     n_negative: bool = False,
     prefix: str = None,
-    suffix: str = None
+    suffix: str = None,
+    strip_tqdm: bool = False
 ) -> str:
     """Apply common output filters and optionally save to file.
 
@@ -358,10 +455,15 @@ def apply_output_filters(
         n_negative: If True, show negative line numbers (for capture_pane)
         prefix: Text to prepend when saving (optional)
         suffix: Text to append when saving (optional)
+        strip_tqdm: Remove tqdm progress lines, keeping only the last group
 
     Returns:
         Filtered output as string
     """
+    # strip_tqdm: applied before grep
+    if strip_tqdm:
+        lines = _filter_tqdm(lines)
+
     # Build regex flags
     flags = re.IGNORECASE if i else 0
 
@@ -454,9 +556,57 @@ def list_sessions() -> list[dict]:
 # Blocking tools (original)
 # =============================================================================
 
+async def _blocking_on_pane(p: str, code: str, send_fn, timeout: float, filter_kwargs: dict, task_type: str = "shell") -> str:
+    """Execute blocking command on a single pane and return filtered output."""
+    lock = acquire_pane_lock(p)
+    task_id, begin, end = generate_task_id_and_marker()
+    start_time = time.time()
+    converted = False
+    try:
+        send_fn(p, code, begin, end)
+        output = await capture_output_blocking(p, begin, end, timeout)
+        lines = output.split('\n') if output else []
+        return apply_output_filters(lines, n_negative=False, **filter_kwargs)
+    except TimeoutError:
+        _tasks[task_id] = {
+            "pane": p, "begin": begin, "end": end,
+            "start_time": start_time, "type": task_type,
+            "command": code, "lock": lock
+        }
+        converted = True
+        return f"[timeout → task] {task_id}"
+    except asyncio.CancelledError:
+        _tasks[task_id] = {
+            "pane": p, "begin": begin, "end": end,
+            "start_time": start_time, "type": task_type,
+            "command": code, "lock": lock
+        }
+        converted = True
+        raise
+    finally:
+        if not converted:
+            lock.release()
+
+
+async def _blocking_multi(target_panes: list[str], code: str, send_fn, timeout: float, fkw: dict, task_type: str = "shell") -> str:
+    """Run blocking command on multiple panes with graceful skip for missing panes."""
+    results = {}
+    coros = {}
+    for p in target_panes:
+        if not check_session(p):
+            results[p] = "not found (skipped)"
+        else:
+            coros[p] = _blocking_on_pane(p, code, send_fn, timeout, fkw, task_type=task_type)
+    if coros:
+        results_list = await asyncio.gather(*coros.values(), return_exceptions=True)
+        for p, result in zip(coros.keys(), results_list):
+            results[p] = str(result) if isinstance(result, Exception) else result
+    return _format_multi_result(results)
+
+
 @mcp.tool()
 async def xpy(
-    pane: str,
+    pane: str = None,
     code: str = None,
     file: str = None,
     timeout: float = 60.0,
@@ -471,12 +621,14 @@ async def xpy(
     C: int = None,
     n: bool = False,
     uniq: bool = True,
+    strip_tqdm: bool = False,
+    panes: list[str] = None,
     ctx: Context = None
 ) -> str:
     """Execute Python code in tmux (blocking). Waits for completion.
 
     Args:
-        pane: Registered tmux pane (e.g., t1:1.0)
+        pane: Single tmux pane (e.g., t1:1.0)
         code: Python code to execute
         file: Python file to execute (alternative to code)
         timeout: Timeout in seconds (default: 60)
@@ -491,11 +643,10 @@ async def xpy(
         C: Lines before and after grep match (like grep -C)
         n: Show line numbers (like grep -n)
         uniq: Remove consecutive duplicate lines (like uniq, default: True)
+        strip_tqdm: Remove tqdm progress lines, keeping only the last group
+        panes: Multiple panes to execute simultaneously (use pane OR panes, not both)
     """
-    check_pane_registered(pane)
-
-    if not check_session(pane):
-        raise ValueError(f"Pane '{pane}' not found in tmux")
+    target_panes = _resolve_panes(pane, panes)
 
     if file:
         client_cwd = await _get_client_cwd(ctx) if ctx else _client_cwd
@@ -510,26 +661,21 @@ async def xpy(
     if "\\n" in code:
         raise ValueError("Code contains \\n which breaks tmux injection. Use print() for blank lines.")
 
-    lock = acquire_pane_lock(pane)
+    fkw = dict(grep=grep, v=v, i=i, w=w, F=F, m=m, A=A, B=B, C=C, n=n, uniq=uniq, strip_tqdm=strip_tqdm)
 
-    try:
-        begin, end = generate_marker()
-        send_python_code(pane, code, begin, end)
-        output = await capture_output_blocking(pane, begin, end, timeout)
-        lines = output.split('\n') if output else []
-        return apply_output_filters(
-            lines, grep=grep, v=v, i=i, w=w, F=F, m=m,
-            A=A, B=B, C=C, n=n, uniq=uniq,
-            n_negative=False
-        )
-    finally:
-        lock.release()
+    if target_panes is not None:
+        return await _blocking_multi(target_panes, code, send_python_code, timeout, fkw, task_type="python")
+
+    check_pane_registered(pane)
+    if not check_session(pane):
+        raise ValueError(f"Pane '{pane}' not found in tmux")
+    return await _blocking_on_pane(pane, code, send_python_code, timeout, fkw, task_type="python")
 
 
 @mcp.tool()
 async def xtcl(
-    pane: str,
-    code: str,
+    pane: str = None,
+    code: str = "",
     timeout: float = 60.0,
     grep: str = None,
     v: str = None,
@@ -541,12 +687,14 @@ async def xtcl(
     B: int = None,
     C: int = None,
     n: bool = False,
-    uniq: bool = True
+    uniq: bool = True,
+    strip_tqdm: bool = False,
+    panes: list[str] = None
 ) -> str:
     """Execute TCL code in tmux (blocking). For EDA tools like Innovus, OpenROAD.
 
     Args:
-        pane: Registered tmux pane (e.g., t1:1.0)
+        pane: Single tmux pane (e.g., t1:1.0)
         code: TCL code to execute
         timeout: Timeout in seconds (default: 60)
         grep: Filter lines matching this regex pattern
@@ -560,31 +708,28 @@ async def xtcl(
         C: Lines before and after grep match (like grep -C)
         n: Show line numbers (like grep -n)
         uniq: Remove consecutive duplicate lines (like uniq, default: True)
+        strip_tqdm: Remove tqdm progress lines, keeping only the last group
+        panes: Multiple panes to execute simultaneously (use pane OR panes, not both)
     """
-    check_pane_registered(pane)
+    target_panes = _resolve_panes(pane, panes)
 
+    if not code:
+        raise ValueError("'code' must be provided")
+
+    fkw = dict(grep=grep, v=v, i=i, w=w, F=F, m=m, A=A, B=B, C=C, n=n, uniq=uniq, strip_tqdm=strip_tqdm)
+
+    if target_panes is not None:
+        return await _blocking_multi(target_panes, code, send_tcl_code, timeout, fkw, task_type="tcl")
+
+    check_pane_registered(pane)
     if not check_session(pane):
         raise ValueError(f"Pane '{pane}' not found in tmux")
-
-    lock = acquire_pane_lock(pane)
-
-    try:
-        begin, end = generate_marker()
-        send_tcl_code(pane, code, begin, end)
-        output = await capture_output_blocking(pane, begin, end, timeout)
-        lines = output.split('\n') if output else []
-        return apply_output_filters(
-            lines, grep=grep, v=v, i=i, w=w, F=F, m=m,
-            A=A, B=B, C=C, n=n, uniq=uniq,
-            n_negative=False
-        )
-    finally:
-        lock.release()
+    return await _blocking_on_pane(pane, code, send_tcl_code, timeout, fkw, task_type="tcl")
 
 
 @mcp.tool()
 async def xsh(
-    pane: str,
+    pane: str = None,
     code: str = None,
     file: str = None,
     timeout: float = 60.0,
@@ -599,12 +744,14 @@ async def xsh(
     C: int = None,
     n: bool = False,
     uniq: bool = True,
+    strip_tqdm: bool = False,
+    panes: list[str] = None,
     ctx: Context = None
 ) -> str:
     """Execute shell command in tmux (blocking). Waits for completion.
 
     Args:
-        pane: Registered tmux pane (e.g., t1:1.0)
+        pane: Single tmux pane (e.g., t1:1.0)
         code: Shell command to execute
         file: Shell script file to execute (alternative to code)
         timeout: Timeout in seconds (default: 60)
@@ -619,11 +766,10 @@ async def xsh(
         C: Lines before and after grep match (like grep -C)
         n: Show line numbers (like grep -n)
         uniq: Remove consecutive duplicate lines (like uniq, default: True)
+        strip_tqdm: Remove tqdm progress lines, keeping only the last group
+        panes: Multiple panes to execute simultaneously (use pane OR panes, not both)
     """
-    check_pane_registered(pane)
-
-    if not check_session(pane):
-        raise ValueError(f"Pane '{pane}' not found in tmux")
+    target_panes = _resolve_panes(pane, panes)
 
     if file:
         client_cwd = await _get_client_cwd(ctx) if ctx else _client_cwd
@@ -635,31 +781,52 @@ async def xsh(
     if not code:
         raise ValueError("Either 'code' or 'file' must be provided")
 
-    lock = acquire_pane_lock(pane)
+    fkw = dict(grep=grep, v=v, i=i, w=w, F=F, m=m, A=A, B=B, C=C, n=n, uniq=uniq, strip_tqdm=strip_tqdm)
 
-    try:
-        begin, end = generate_marker()
-        send_shell_code(pane, code, begin, end)
-        output = await capture_output_blocking(pane, begin, end, timeout)
-        lines = output.split('\n') if output else []
-        return apply_output_filters(
-            lines, grep=grep, v=v, i=i, w=w, F=F, m=m,
-            A=A, B=B, C=C, n=n, uniq=uniq,
-            n_negative=False
-        )
-    finally:
-        lock.release()
+    if target_panes is not None:
+        return await _blocking_multi(target_panes, code, send_shell_code, timeout, fkw)
+
+    check_pane_registered(pane)
+    if not check_session(pane):
+        raise ValueError(f"Pane '{pane}' not found in tmux")
+    return await _blocking_on_pane(pane, code, send_shell_code, timeout, fkw)
 
 
 # =============================================================================
 # Non-blocking tools (background execution)
 # =============================================================================
 
+def _start_on_pane(p: str, code: str, task_type: str, send_fn) -> str:
+    """Start a non-blocking task on a single pane. Returns status string."""
+    if not check_session(p):
+        return f"{p}: not found (skipped)"
+
+    lock = get_pane_lock(p)
+    if not lock.acquire(blocking=False):
+        return f"{p}: busy (skipped)"
+
+    task_id, begin, end = generate_task_id_and_marker()
+    send_fn(p, code, begin, end)
+
+    _tasks[task_id] = {
+        "pane": p,
+        "begin": begin,
+        "end": end,
+        "start_time": time.time(),
+        "type": task_type,
+        "command": code,
+        "lock": lock
+    }
+
+    return f"{p}: {task_id} (started)"
+
+
 @mcp.tool()
 async def xpy_start(
-    pane: str,
+    pane: str = None,
     code: str = None,
     file: str = None,
+    panes: list[str] = None,
     ctx: Context = None
 ) -> str:
     """Start Python code execution (non-blocking). Returns task_id immediately.
@@ -667,14 +834,12 @@ async def xpy_start(
     Use task_status for status, task_output for output, task_wait to block.
 
     Args:
-        pane: Registered tmux pane (e.g., t1:1.0)
+        pane: Single tmux pane (e.g., t1:1.0)
         code: Python code to execute
         file: Python file to execute
+        panes: Multiple panes to start simultaneously (use pane OR panes, not both)
     """
-    check_pane_registered(pane)
-
-    if not check_session(pane):
-        raise ValueError(f"Pane '{pane}' not found in tmux")
+    target_panes = _resolve_panes(pane, panes)
 
     if file:
         client_cwd = await _get_client_cwd(ctx) if ctx else _client_cwd
@@ -689,62 +854,56 @@ async def xpy_start(
     if "\\n" in code:
         raise ValueError("Code contains \\n which breaks tmux injection. Use print() for blank lines.")
 
+    if target_panes is not None:
+        results = [_start_on_pane(p, code, "python", send_python_code) for p in target_panes]
+        return '\n'.join(results)
+
+    check_pane_registered(pane)
     lock = acquire_pane_lock(pane)
-
     task_id, begin, end = generate_task_id_and_marker()
-
     send_python_code(pane, code, begin, end)
-
     _tasks[task_id] = {
-        "pane": pane,
-        "begin": begin,
-        "end": end,
-        "start_time": time.time(),
-        "type": "python",
-        "command": code,
-        "lock": lock
+        "pane": pane, "begin": begin, "end": end,
+        "start_time": time.time(), "type": "python", "command": code, "lock": lock
     }
-
     return f"Started task {task_id} on {pane}"
 
 
 @mcp.tool()
-def xtcl_start(pane: str, code: str) -> str:
+def xtcl_start(pane: str = None, code: str = "", panes: list[str] = None) -> str:
     """Start TCL code execution (non-blocking). Returns task_id immediately.
 
     Args:
-        pane: Registered tmux pane (e.g., t1:1.0)
+        pane: Single tmux pane (e.g., t1:1.0)
         code: TCL code to execute
+        panes: Multiple panes to start simultaneously (use pane OR panes, not both)
     """
+    target_panes = _resolve_panes(pane, panes)
+
+    if not code:
+        raise ValueError("'code' must be provided")
+
+    if target_panes is not None:
+        results = [_start_on_pane(p, code, "tcl", send_tcl_code) for p in target_panes]
+        return '\n'.join(results)
+
     check_pane_registered(pane)
-
-    if not check_session(pane):
-        raise ValueError(f"Pane '{pane}' not found in tmux")
-
     lock = acquire_pane_lock(pane)
-
     task_id, begin, end = generate_task_id_and_marker()
-
     send_tcl_code(pane, code, begin, end)
-
     _tasks[task_id] = {
-        "pane": pane,
-        "begin": begin,
-        "end": end,
-        "start_time": time.time(),
-        "type": "tcl",
-        "command": code,
-        "lock": lock
+        "pane": pane, "begin": begin, "end": end,
+        "start_time": time.time(), "type": "tcl", "command": code, "lock": lock
     }
-
     return f"Started task {task_id} on {pane}"
 
 
 @mcp.tool()
 async def xsh_start(
-    pane: str,
+    pane: str = None,
     code: str = None,
     file: str = None,
+    panes: list[str] = None,
     ctx: Context = None
 ) -> str:
     """Start shell command execution (non-blocking). Returns task_id immediately.
@@ -752,14 +911,12 @@ async def xsh_start(
     Use task_status for status, task_output for output, task_wait to block.
 
     Args:
-        pane: Registered tmux pane (e.g., t1:1.0)
+        pane: Single tmux pane (e.g., t1:1.0)
         code: Shell command to execute
         file: Shell script file to execute
+        panes: Multiple panes to start simultaneously (use pane OR panes, not both)
     """
-    check_pane_registered(pane)
-
-    if not check_session(pane):
-        raise ValueError(f"Pane '{pane}' not found in tmux")
+    target_panes = _resolve_panes(pane, panes)
 
     if file:
         client_cwd = await _get_client_cwd(ctx) if ctx else _client_cwd
@@ -771,22 +928,18 @@ async def xsh_start(
     if not code:
         raise ValueError("Either 'code' or 'file' must be provided")
 
+    if target_panes is not None:
+        results = [_start_on_pane(p, code, "shell", send_shell_code) for p in target_panes]
+        return '\n'.join(results)
+
+    check_pane_registered(pane)
     lock = acquire_pane_lock(pane)
-
     task_id, begin, end = generate_task_id_and_marker()
-
     send_shell_code(pane, code, begin, end)
-
     _tasks[task_id] = {
-        "pane": pane,
-        "begin": begin,
-        "end": end,
-        "start_time": time.time(),
-        "type": "shell",
-        "command": code,
-        "lock": lock
+        "pane": pane, "begin": begin, "end": end,
+        "start_time": time.time(), "type": "shell", "command": code, "lock": lock
     }
-
     return f"Started task {task_id} on {pane}"
 
 
@@ -814,9 +967,66 @@ def task_status(task_id: str) -> str:
     return f"[{status}] {elapsed:.1f}s"
 
 
+def _get_single_task_output(
+    tid: str, tail: int, head: int, line_range: str,
+    save: str, append: bool, prefix: str, suffix: str,
+    include_command: bool, command_prefix: str, markdown: bool,
+    filter_kwargs: dict
+) -> str:
+    """Get filtered output for a single task."""
+    if tid not in _tasks:
+        raise ValueError(f"Task '{tid}' not found")
+
+    task = _tasks[tid]
+    output, completed = check_task_output(task["pane"], task["begin"], task["end"])
+
+    if completed and "lock" in task:
+        task["lock"].release()
+        del task["lock"]
+
+    if not output:
+        return output
+
+    all_lines = output.split('\n')
+
+    if line_range:
+        parts = line_range.split(":")
+        start = int(parts[0]) if parts[0].strip() else 0
+        end = int(parts[1]) if parts[1].strip() else len(all_lines)
+        all_lines = all_lines[start:end]
+    elif head is not None and head > 0:
+        all_lines = all_lines[:head]
+    elif tail > 0 and len(all_lines) > tail:
+        all_lines = all_lines[-tail:]
+
+    if save and (markdown or include_command):
+        lang = task.get("type", "")
+        cmd = task.get("command", "")
+        if include_command:
+            all_lines = [f"{command_prefix}{cmd}"] + all_lines
+        if markdown:
+            md_prefix = f"```{lang}\n"
+            md_suffix = "\n```"
+        else:
+            md_prefix = ""
+            md_suffix = ""
+        effective_prefix = (prefix or '') + md_prefix
+        effective_suffix = md_suffix + (suffix or '')
+    else:
+        effective_prefix = prefix
+        effective_suffix = suffix
+
+    return apply_output_filters(
+        all_lines, n_negative=False,
+        save=save, append=append, prefix=effective_prefix, suffix=effective_suffix,
+        **filter_kwargs
+    )
+
+
 @mcp.tool()
 def task_output(
-    task_id: str,
+    task_id: str = None,
+    task_ids: list[str] = None,
     tail: int = 0,
     head: int = None,
     range: str = None,
@@ -831,6 +1041,7 @@ def task_output(
     C: int = None,
     n: bool = False,
     uniq: bool = True,
+    strip_tqdm: bool = False,
     save: str = None,
     append: bool = True,
     prefix: str = None,
@@ -842,7 +1053,8 @@ def task_output(
     """Get task output (non-blocking).
 
     Args:
-        task_id: Task ID from xpy_start, xtcl_start, or xsh_start
+        task_id: Single task ID (use task_id OR task_ids, not both)
+        task_ids: Multiple task IDs to get output simultaneously
         tail: If > 0, return only the last N lines (default: 0 = all)
         head: If provided, return only the first N lines
         range: Line range, e.g., "10:20" (0-indexed, within marker output)
@@ -857,6 +1069,7 @@ def task_output(
         C: Lines before and after grep match (like grep -C)
         n: Show line numbers (like grep -n)
         uniq: Remove consecutive duplicate lines (like uniq, default: True)
+        strip_tqdm: Remove tqdm progress lines, keeping only the last group
         save: File path to save output (optional)
         append: If True, append to file (>>); if False, overwrite (>)
         prefix: Text to prepend before output (when saving)
@@ -865,61 +1078,23 @@ def task_output(
         command_prefix: Prefix for include_command (default: "$ "). E.g., "pt_shell> ", ">>> "
         markdown: If True, wrap output in ```lang ... ``` code block (when saving)
     """
-    if task_id not in _tasks:
-        raise ValueError(f"Task '{task_id}' not found")
+    if (task_id is None) == (task_ids is None):
+        raise ValueError("Use 'task_id' or 'task_ids', not both")
 
-    task = _tasks[task_id]
-    output, completed = check_task_output(task["pane"], task["begin"], task["end"])
+    fkw = dict(grep=grep, v=v, i=i, w=w, F=F, m=m, A=A, B=B, C=C, n=n, uniq=uniq, strip_tqdm=strip_tqdm)
 
-    # Auto-release lock when completed
-    if completed and "lock" in task:
-        task["lock"].release()
-        del task["lock"]
+    if task_ids is not None:
+        results = {}
+        for tid in task_ids:
+            results[tid] = _get_single_task_output(
+                tid, tail, head, range, save, append, prefix, suffix,
+                include_command, command_prefix, markdown, fkw
+            )
+        return _format_multi_result(results)
 
-    if not output:
-        return output
-
-    all_lines = output.split('\n')
-
-    # Apply range, head, or tail
-    if range:
-        parts = range.split(":")
-        start = int(parts[0]) if parts[0].strip() else 0
-        end = int(parts[1]) if parts[1].strip() else len(all_lines)
-        all_lines = all_lines[start:end]
-    elif head is not None and head > 0:
-        all_lines = all_lines[:head]
-    elif tail > 0 and len(all_lines) > tail:
-        all_lines = all_lines[-tail:]
-
-    # Build content for saving with markdown/include_command
-    if save and (markdown or include_command):
-        lang = task.get("type", "")
-        cmd = task.get("command", "")
-
-        # include_command: prepend command with prefix to output
-        if include_command:
-            all_lines = [f"{command_prefix}{cmd}"] + all_lines
-
-        # markdown: wrap in code block
-        if markdown:
-            md_prefix = f"```{lang}\n"
-            md_suffix = "\n```"
-        else:
-            md_prefix = ""
-            md_suffix = ""
-
-        # Final: prefix + md_prefix + content + md_suffix + suffix
-        effective_prefix = (prefix or '') + md_prefix
-        effective_suffix = md_suffix + (suffix or '')
-    else:
-        effective_prefix = prefix
-        effective_suffix = suffix
-
-    return apply_output_filters(
-        all_lines, grep=grep, v=v, i=i, w=w, F=F, m=m,
-        A=A, B=B, C=C, n=n, uniq=uniq, save=save, append=append,
-        n_negative=False, prefix=effective_prefix, suffix=effective_suffix
+    return _get_single_task_output(
+        task_id, tail, head, range, save, append, prefix, suffix,
+        include_command, command_prefix, markdown, fkw
     )
 
 
@@ -992,22 +1167,29 @@ async def task_wait(task_id: str = None, task_ids: list[str] = None, timeout: fl
 
 
 @mcp.tool()
-def task_list() -> str:
-    """List all running background tasks."""
-    if not _tasks:
-        return "No running tasks"
+def task_list(all: bool = False) -> str:
+    """List background tasks. By default shows running only.
 
-    lines = ["Running tasks:"]
+    Args:
+        all: If True, include completed tasks (default: running only)
+    """
+    if not _tasks:
+        return "No tasks"
+
+    lines = []
     for task_id, task in _tasks.items():
         elapsed = time.time() - task["start_time"]
-        output, completed = check_task_output(task["pane"], task["begin"], task["end"])
+        _, completed = check_task_output(task["pane"], task["begin"], task["end"])
+        if completed and not all:
+            continue
         status = "completed" if completed else "running"
-        # Truncate command for display (max 40 chars)
         cmd = task.get("command", "")
         cmd_display = (cmd[:37] + "...") if len(cmd) > 40 else cmd
-        cmd_display = cmd_display.replace('\n', ' ')  # single line
-        lines.append(f"  {task_id} [{task['type']}] [{status}] {elapsed:.1f}s  \"{cmd_display}\"")
+        cmd_display = cmd_display.replace('\n', ' ')
+        lines.append(f"  {task_id} [{task['pane']}] [{task['type']}] [{status}] {elapsed:.1f}s  \"{cmd_display}\"")
 
+    if not lines:
+        return "No running tasks"
     return '\n'.join(lines)
 
 
@@ -1124,123 +1306,169 @@ async def peek_output(pane: str, begin: str, wait: float) -> str:
     return '\n'.join(result).rstrip()
 
 
+async def _peek_on_pane_py(p: str, code: str, wait: float) -> str:
+    """Peek helper for Python on a single pane."""
+    lock = acquire_pane_lock(p)
+    try:
+        begin, _ = generate_marker()
+        run_tmux_cmd(["send-keys", "-t", p, "-X", "cancel"], capture=False)
+        run_tmux_cmd(["send-keys", "-t", p, f'print("{begin}")'], capture=False)
+        run_tmux_cmd(["send-keys", "-t", p, "Enter"], capture=False)
+        for line in code.split('\n'):
+            run_tmux_cmd(["send-keys", "-t", p, line], capture=False)
+            run_tmux_cmd(["send-keys", "-t", p, "Enter"], capture=False)
+        return await peek_output(p, begin, wait)
+    finally:
+        lock.release()
+
+
+async def _peek_on_pane_tcl(p: str, code: str, wait: float) -> str:
+    """Peek helper for TCL on a single pane."""
+    lock = acquire_pane_lock(p)
+    try:
+        begin, _ = generate_marker()
+        run_tmux_cmd(["send-keys", "-t", p, "-X", "cancel"], capture=False)
+        run_tmux_cmd(["send-keys", "-t", p, f'puts "{begin}"'], capture=False)
+        run_tmux_cmd(["send-keys", "-t", p, "Enter"], capture=False)
+        run_tmux_cmd(["send-keys", "-t", p, code], capture=False)
+        run_tmux_cmd(["send-keys", "-t", p, "Enter"], capture=False)
+        return await peek_output(p, begin, wait)
+    finally:
+        lock.release()
+
+
+async def _peek_on_pane_sh(p: str, code: str, wait: float) -> str:
+    """Peek helper for shell on a single pane."""
+    lock = acquire_pane_lock(p)
+    try:
+        begin, _ = generate_marker()
+        run_tmux_cmd(["send-keys", "-t", p, "-X", "cancel"], capture=False)
+        run_tmux_cmd(["send-keys", "-t", p, f"echo '{begin}'"], capture=False)
+        run_tmux_cmd(["send-keys", "-t", p, "Enter"], capture=False)
+        for line in code.split('\n'):
+            run_tmux_cmd(["send-keys", "-t", p, line], capture=False)
+            run_tmux_cmd(["send-keys", "-t", p, "Enter"], capture=False)
+        return await peek_output(p, begin, wait)
+    finally:
+        lock.release()
+
+
+async def _peek_multi(target_panes: list[str], code: str, wait: float, peek_fn) -> str:
+    """Run peek on multiple panes concurrently and return grouped result."""
+    results = {}
+    coros = {}
+    for p in target_panes:
+        if not check_session(p):
+            results[p] = "not found (skipped)"
+        else:
+            coros[p] = peek_fn(p, code, wait)
+    if coros:
+        results_list = await asyncio.gather(*coros.values(), return_exceptions=True)
+        for p, result in zip(coros.keys(), results_list):
+            results[p] = str(result) if isinstance(result, Exception) else result
+    return _format_multi_result(results)
+
+
 @mcp.tool()
 async def xpy_peek(
-    pane: str,
-    code: str,
-    wait: float = 1.0
+    pane: str = None,
+    code: str = "",
+    wait: float = 1.0,
+    panes: list[str] = None
 ) -> str:
     """Execute Python code and capture output for a short time (no end marker wait).
 
     Args:
-        pane: Registered tmux pane (e.g., t1:1.0)
+        pane: Single tmux pane (e.g., t1:1.0)
         code: Python code to execute
         wait: Seconds to wait before capturing (default: 1.0)
+        panes: Multiple panes (use pane OR panes, not both)
     """
-    check_pane_registered(pane)
+    target_panes = _resolve_panes(pane, panes)
+    if target_panes is not None:
+        return await _peek_multi(target_panes, code, wait, _peek_on_pane_py)
 
+    check_pane_registered(pane)
     if not check_session(pane):
         raise ValueError(f"Pane '{pane}' not found in tmux")
-
-    lock = acquire_pane_lock(pane)
-
-    try:
-        begin, _ = generate_marker()
-
-        run_tmux_cmd(["send-keys", "-t", pane, "-X", "cancel"], capture=False)
-        run_tmux_cmd(["send-keys", "-t", pane, f'print("{begin}")'], capture=False)
-        run_tmux_cmd(["send-keys", "-t", pane, "Enter"], capture=False)
-
-        for line in code.split('\n'):
-            run_tmux_cmd(["send-keys", "-t", pane, line], capture=False)
-            run_tmux_cmd(["send-keys", "-t", pane, "Enter"], capture=False)
-
-        return await peek_output(pane, begin, wait)
-    finally:
-        lock.release()
+    return await _peek_on_pane_py(pane, code, wait)
 
 
 @mcp.tool()
 async def xtcl_peek(
-    pane: str,
-    code: str,
-    wait: float = 1.0
+    pane: str = None,
+    code: str = "",
+    wait: float = 1.0,
+    panes: list[str] = None
 ) -> str:
     """Execute TCL code and capture output for a short time (no end marker wait).
 
     Args:
-        pane: Registered tmux pane (e.g., t1:1.0)
+        pane: Single tmux pane (e.g., t1:1.0)
         code: TCL code to execute
         wait: Seconds to wait before capturing (default: 1.0)
+        panes: Multiple panes (use pane OR panes, not both)
     """
-    check_pane_registered(pane)
+    target_panes = _resolve_panes(pane, panes)
+    if target_panes is not None:
+        return await _peek_multi(target_panes, code, wait, _peek_on_pane_tcl)
 
+    check_pane_registered(pane)
     if not check_session(pane):
         raise ValueError(f"Pane '{pane}' not found in tmux")
-
-    lock = acquire_pane_lock(pane)
-
-    try:
-        begin, _ = generate_marker()
-
-        run_tmux_cmd(["send-keys", "-t", pane, "-X", "cancel"], capture=False)
-        run_tmux_cmd(["send-keys", "-t", pane, f'puts "{begin}"'], capture=False)
-        run_tmux_cmd(["send-keys", "-t", pane, "Enter"], capture=False)
-        run_tmux_cmd(["send-keys", "-t", pane, code], capture=False)
-        run_tmux_cmd(["send-keys", "-t", pane, "Enter"], capture=False)
-
-        return await peek_output(pane, begin, wait)
-    finally:
-        lock.release()
+    return await _peek_on_pane_tcl(pane, code, wait)
 
 
 @mcp.tool()
 async def xsh_peek(
-    pane: str,
-    code: str,
-    wait: float = 1.0
+    pane: str = None,
+    code: str = "",
+    wait: float = 1.0,
+    panes: list[str] = None
 ) -> str:
     """Execute shell command and capture output for a short time (no end marker wait).
 
     Args:
-        pane: Registered tmux pane (e.g., t1:1.0)
+        pane: Single tmux pane (e.g., t1:1.0)
         code: Shell command to execute
         wait: Seconds to wait before capturing (default: 1.0)
+        panes: Multiple panes (use pane OR panes, not both)
     """
-    check_pane_registered(pane)
+    target_panes = _resolve_panes(pane, panes)
+    if target_panes is not None:
+        return await _peek_multi(target_panes, code, wait, _peek_on_pane_sh)
 
+    check_pane_registered(pane)
     if not check_session(pane):
         raise ValueError(f"Pane '{pane}' not found in tmux")
-
-    lock = acquire_pane_lock(pane)
-
-    try:
-        begin, _ = generate_marker()
-
-        run_tmux_cmd(["send-keys", "-t", pane, "-X", "cancel"], capture=False)
-        run_tmux_cmd(["send-keys", "-t", pane, f"echo '{begin}'"], capture=False)
-        run_tmux_cmd(["send-keys", "-t", pane, "Enter"], capture=False)
-
-        for line in code.split('\n'):
-            run_tmux_cmd(["send-keys", "-t", pane, line], capture=False)
-            run_tmux_cmd(["send-keys", "-t", pane, "Enter"], capture=False)
-
-        return await peek_output(pane, begin, wait)
-    finally:
-        lock.release()
+    return await _peek_on_pane_sh(pane, code, wait)
 
 
 @mcp.tool()
-def send_text(pane: str, text: str, enter: bool = True) -> str:
-    """Send text string to pane. For commands, passwords, etc.
+def send_text(pane: str = None, text: str = "", enter: bool = True, panes: list[str] = None) -> str:
+    """Send text string to pane(s). For commands, passwords, etc.
 
     Args:
-        pane: Registered tmux pane (e.g., t1:1.0)
+        pane: Single tmux pane (e.g., t1:1.0)
         text: Text to send as-is
         enter: Press Enter after text (default: True)
+        panes: Multiple panes to send simultaneously (use pane OR panes, not both)
     """
-    check_pane_registered(pane)
+    target_panes = _resolve_panes(pane, panes)
 
+    if target_panes is not None:
+        results = {}
+        for p in target_panes:
+            if not check_session(p):
+                results[p] = "not found (skipped)"
+                continue
+            run_tmux_cmd(["send-keys", "-t", p, text], capture=False)
+            if enter:
+                run_tmux_cmd(["send-keys", "-t", p, "Enter"], capture=False)
+            results[p] = "sent"
+        return _format_multi_result(results)
+
+    check_pane_registered(pane)
     if not check_session(pane):
         raise ValueError(f"Pane '{pane}' not found in tmux")
 
@@ -1252,16 +1480,31 @@ def send_text(pane: str, text: str, enter: bool = True) -> str:
 
 
 @mcp.tool()
-def send_keys(pane: str, keys: str, enter: bool = False) -> str:
-    """Send special keys to pane. For C-c, Enter, Escape, arrow keys, etc.
+def send_keys(pane: str = None, keys: str = "", enter: bool = False, panes: list[str] = None) -> str:
+    """Send special keys to pane(s). For C-c, Enter, Escape, arrow keys, etc.
 
     Args:
-        pane: Registered tmux pane (e.g., t1:1.0)
+        pane: Single tmux pane (e.g., t1:1.0)
         keys: Space-separated special keys (e.g., "C-c C-c C-c", "Up Up Enter")
         enter: Press Enter after keys (default: False)
+        panes: Multiple panes to send simultaneously (use pane OR panes, not both)
     """
-    check_pane_registered(pane)
+    target_panes = _resolve_panes(pane, panes)
 
+    if target_panes is not None:
+        results = {}
+        for p in target_panes:
+            if not check_session(p):
+                results[p] = "not found (skipped)"
+                continue
+            for key in keys.split():
+                run_tmux_cmd(["send-keys", "-t", p, key], capture=False)
+            if enter:
+                run_tmux_cmd(["send-keys", "-t", p, "Enter"], capture=False)
+            results[p] = "sent"
+        return _format_multi_result(results)
+
+    check_pane_registered(pane)
     if not check_session(pane):
         raise ValueError(f"Pane '{pane}' not found in tmux")
 
@@ -1274,9 +1517,31 @@ def send_keys(pane: str, keys: str, enter: bool = False) -> str:
     return "Keys sent"
 
 
+def _capture_single_pane(p: str, tail: int, rel_range: str, since_marker: str, filter_kwargs: dict) -> str:
+    """Capture and filter a single pane."""
+    raw = run_tmux_cmd(["capture-pane", "-t", p, "-p", "-S", "-"])
+    all_lines = raw.rstrip().split('\n')
+
+    if since_marker:
+        marker_idx = None
+        for idx, line in enumerate(all_lines):
+            if since_marker in line:
+                marker_idx = idx
+        if marker_idx is not None:
+            all_lines = all_lines[marker_idx + 1:]
+
+    if rel_range:
+        start, end = parse_rel_range(rel_range)
+        all_lines = all_lines[start:end]
+    elif tail > 0 and len(all_lines) > tail:
+        all_lines = all_lines[-tail:]
+
+    return apply_output_filters(all_lines, n_negative=True, **filter_kwargs)
+
+
 @mcp.tool()
 def capture_pane(
-    pane: str,
+    pane: str = None,
     tail: int = 5,
     rel_range: str = None,
     grep: str = None,
@@ -1291,15 +1556,17 @@ def capture_pane(
     since_marker: str = None,
     uniq: bool = True,
     n: bool = False,
+    strip_tqdm: bool = False,
     save: str = None,
     append: bool = True,
     prefix: str = None,
-    suffix: str = None
+    suffix: str = None,
+    panes: list[str] = None
 ) -> str:
     """Capture current pane content.
 
     Args:
-        pane: Registered tmux pane (e.g., t1:1.0)
+        pane: Single tmux pane (e.g., t1:1.0)
         tail: Number of lines to capture from end (default: 5)
         rel_range: Relative range from end, e.g., "100:50" (100th from end to 50th from end)
         grep: Filter lines matching this regex pattern
@@ -1314,40 +1581,31 @@ def capture_pane(
         since_marker: Only capture lines after this marker
         uniq: Remove consecutive duplicate lines (like uniq, default: True)
         n: Show line numbers as negative indices from end (like nl/cat -n)
+        strip_tqdm: Remove tqdm progress lines, keeping only the last group
         save: File path to save output (optional)
         append: If True, append to file (>>); if False, overwrite (>)
         prefix: Text to prepend when saving (optional)
         suffix: Text to append when saving (optional)
+        panes: Multiple panes to capture simultaneously (use pane OR panes, not both)
     """
-    check_pane_registered(pane)
+    target_panes = _resolve_panes(pane, panes)
+    fkw = dict(grep=grep, v=v, i=i, w=w, F=F, m=m, A=A, B=B, C=C, n=n,
+               uniq=uniq, save=save, append=append, prefix=prefix, suffix=suffix,
+               strip_tqdm=strip_tqdm)
 
+    if target_panes is not None:
+        results = {}
+        for p in target_panes:
+            if not check_session(p):
+                results[p] = "not found (skipped)"
+                continue
+            results[p] = _capture_single_pane(p, tail, rel_range, since_marker, fkw)
+        return _format_multi_result(results)
+
+    check_pane_registered(pane)
     if not check_session(pane):
         raise ValueError(f"Pane '{pane}' not found in tmux")
-
-    raw = run_tmux_cmd(["capture-pane", "-t", pane, "-p", "-S", "-"])
-    all_lines = raw.rstrip().split('\n')
-
-    # Apply since_marker filter
-    if since_marker:
-        marker_idx = None
-        for i, line in enumerate(all_lines):
-            if since_marker in line:
-                marker_idx = i
-        if marker_idx is not None:
-            all_lines = all_lines[marker_idx + 1:]
-
-    # Apply rel_range or tail
-    if rel_range:
-        start, end = parse_rel_range(rel_range)
-        all_lines = all_lines[start:end]
-    elif tail > 0 and len(all_lines) > tail:
-        all_lines = all_lines[-tail:]
-
-    return apply_output_filters(
-        all_lines, grep=grep, v=v, i=i, w=w, F=F, m=m,
-        A=A, B=B, C=C, n=n, uniq=uniq, save=save, append=append,
-        n_negative=True, prefix=prefix, suffix=suffix
-    )
+    return _capture_single_pane(pane, tail, rel_range, since_marker, fkw)
 
 
 @mcp.tool()
