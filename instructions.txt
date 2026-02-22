@@ -67,10 +67,10 @@ Passing variables from REPL to script (globals trick):
 
 Panes must be registered before use.
 
-    set_working_pane("t1:1.0", "description")
-    get_working_panes()
+    set_pane("t1:1.0", "description")
+    ls()
 
-"Pane not registered" error → get_working_panes() first, then re-register if needed.
+"Pane not registered" error → ls() first, then re-register if needed.
 
 ==========
 4. CODE LIMITATIONS
@@ -144,5 +144,52 @@ Exit commands produce no end marker. Use peek for exit:
 ==========
 
 Registered panes persist in MCP server memory across conversation compaction.
-After compaction: get_working_panes() to check what is registered.
+After compaction: ls() to check what is registered.
 New session or server restart: ask user which pane to use.
+
+==========
+9. OWNERSHIP MODEL
+==========
+
+Sessions, windows, and panes have an owner: "managed" (created by MCP) or "external" (pre-existing).
+
+set_pane() auto-registers the session/window as "external".
+create_session()/create_window() registers as "managed".
+
+Destructive actions on external resources require force=True.
+Destructive actions on managed resources proceed immediately.
+
+tmux kill-session, tmux kill-window via Bash: NEVER used.
+All session/window lifecycle is through MCP tools only.
+
+==========
+10. SESSION/WINDOW MANAGEMENT
+==========
+
+Creating sessions and windows:
+    create_session("bench", windows=["nvdla", "ariane"], start_dir="/data/project")
+    create_window("bench", "hidden1", start_dir="/data/project")
+    # All panes auto-registered as managed
+
+Killing managed resources (immediate):
+    kill_session("bench")           # managed → killed
+    kill_window("bench", "nvdla")   # managed → killed
+
+Killing external resources (requires force):
+    kill_session("bench")           # external → error with session info
+    kill_session("bench", force=True)  # external + force → killed (user confirms via Claude Code)
+
+Duplicate session check:
+    create_session("bench")  # already exists → error with session info
+
+==========
+11. PANE-BASED TASK LOOKUP
+==========
+
+task_status, task_output, task_wait accept pane/panes as alternative to task_id/task_ids.
+Pane is resolved to the active (running) task on that pane.
+
+    task_status(pane="bench:nvdla.0")              # status of active task on pane
+    task_output(pane="bench:nvdla.0", tail=10)     # output of active task on pane
+    task_wait(pane="bench:nvdla.0", timeout=300)   # wait for active task on pane
+    task_wait(panes=["bench:nvdla.0", "bench:ariane.0"])  # wait for multiple panes
