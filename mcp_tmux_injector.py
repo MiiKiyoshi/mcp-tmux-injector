@@ -4,13 +4,13 @@ MCP Server for tmux command injection (xpy/xtcl/xsh functionality)
 Sends commands to Python REPL, TCL-based EDA tools, or shell running in tmux panes.
 Supports both blocking and non-blocking (background) execution.
 
-IMPORTANT: Panes must be registered before use with set_working_pane().
+IMPORTANT: Panes must be registered before use with set_pane().
 
 USAGE PATTERNS:
 
 0. Register pane first (REQUIRED):
-   set_working_pane("t1:1.0", "OpenROAD Python REPL")
-   get_working_panes()  # Check registered panes
+   set_pane("t1:1.0", "OpenROAD Python REPL")
+   ls()  # Check sessions and registered panes
 
 1. Shell commands (bash pane):
    xsh(pane, "echo hello && pwd")
@@ -29,9 +29,9 @@ USAGE PATTERNS:
    send_keys(pane, "C-c C-c C-c")   # Send Ctrl+C multiple times
 
 IMPORTANT:
-- Panes MUST be registered with set_working_pane() before use
-- If you get "Pane not registered" error, run get_working_panes() to check
-- Context may be lost after compaction - always verify with get_working_panes()
+- Panes MUST be registered with set_pane() before use
+- If you get "Pane not registered" error, run ls() to check
+- Context may be lost after compaction - always verify with ls()
 """
 
 import subprocess
@@ -63,8 +63,15 @@ _tasks: dict[str, dict] = {}
 _pane_locks: dict[str, threading.Lock] = {}
 _pane_locks_lock = threading.Lock()  # Lock for accessing _pane_locks dict
 
-# Registered working panes: pane -> description
-_working_panes: dict[str, str] = {}
+# Ownership constants
+MANAGED = "managed"
+EXTERNAL = "external"
+
+# Session registry: session_name -> {owner, created_at, windows: {name -> {owner}}}
+_sessions: dict[str, dict] = {}
+
+# Registered working panes: pane -> {description, owner}
+_working_panes: dict[str, dict] = {}
 
 # Client cwd from roots/list (cached after first query)
 _client_cwd: str | None = None
@@ -100,8 +107,8 @@ def get_registered_panes_message() -> str:
     if not _working_panes:
         return "No panes registered."
     lines = ["Registered panes:"]
-    for pane, desc in _working_panes.items():
-        lines.append(f"  {pane}: {desc}")
+    for pane, info in _working_panes.items():
+        lines.append(f"  {pane}: {info['description']} ({info['owner']})")
     return '\n'.join(lines)
 
 
@@ -112,8 +119,8 @@ def check_pane_registered(pane: str) -> None:
             # Registered panes exist - suggest using one of them
             lines = [f"Pane '{pane}' is not registered.", ""]
             lines.append("Available panes (use one of these):")
-            for p, desc in _working_panes.items():
-                lines.append(f"  {p}: {desc}")
+            for p, info in _working_panes.items():
+                lines.append(f"  {p}: {info['description']}")
             lines.append("")
             pane_names = list(_working_panes.keys())
             if len(pane_names) == 1:
@@ -129,7 +136,7 @@ def check_pane_registered(pane: str) -> None:
 No panes registered.
 
 Context may have been lost due to compaction.
-Ask user for permission before registering with set_working_pane()."""
+Ask user for permission before registering with set_pane()."""
         raise ValueError(msg)
 
 
@@ -160,8 +167,7 @@ def acquire_pane_lock(pane: str) -> threading.Lock:
         if task['pane'] == pane and 'lock' in task:
             _, completed = check_task_output(pane, task['begin'], task['end'])
             if completed:
-                task['lock'].release()
-                del task['lock']
+                _finalize_task(task)
                 if lock.acquire(blocking=False):
                     return lock
 
@@ -179,9 +185,9 @@ def run_tmux_cmd(args: list[str], capture: bool = True) -> str:
 
 
 def check_session(session: str) -> bool:
-    """Check if tmux session exists."""
+    """Check if tmux session exists (exact match)."""
     result = subprocess.run(
-        ["tmux", "has-session", "-t", session],
+        ["tmux", "has-session", "-t", f"={session}"],
         capture_output=True
     )
     return result.returncode == 0
@@ -553,6 +559,152 @@ def list_sessions() -> list[dict]:
 
 
 # =============================================================================
+# Ownership helpers
+# =============================================================================
+
+def parse_pane_id(pane: str) -> tuple[str, str, str]:
+    """Parse pane ID into (session, window, pane_idx).
+    Example: 'bench:nvdla_m.0' → ('bench', 'nvdla_m', '0')
+    """
+    colon_idx = pane.index(':')
+    session = pane[:colon_idx]
+    rest = pane[colon_idx + 1:]
+    dot_idx = rest.rindex('.')
+    window = rest[:dot_idx]
+    pane_idx = rest[dot_idx + 1:]
+    return session, window, pane_idx
+
+
+def _auto_register_session_window(pane: str) -> None:
+    """Auto-register session and window as external when a pane is registered."""
+    session, window, _ = parse_pane_id(pane)
+    if session not in _sessions:
+        _sessions[session] = {
+            "owner": EXTERNAL,
+            "created_at": time.time(),
+            "windows": {}
+        }
+    if window not in _sessions[session]["windows"]:
+        _sessions[session]["windows"][window] = {"owner": EXTERNAL}
+
+
+def _session_info_str(session_name: str) -> str:
+    """Format session info for error messages."""
+    if session_name not in _sessions:
+        return f"Session '{session_name}': not in registry"
+    info = _sessions[session_name]
+    lines = [f"Session '{session_name}' ({info['owner']}):"]
+    windows = _list_windows(session_name)
+    for w in windows:
+        w_owner = info["windows"].get(w, {}).get("owner", "unknown")
+        panes_in_window = [p for p in _working_panes if p.startswith(f"{session_name}:{w}.")]
+        pane_str = f" [{len(panes_in_window)} pane(s) registered]" if panes_in_window else ""
+        lines.append(f"  {w} ({w_owner}){pane_str}")
+    return '\n'.join(lines)
+
+
+def _check_ownership(resource_type: str, name: str, owner: str, force: bool) -> None:
+    """Raise error if resource is external and force is False."""
+    if owner == EXTERNAL and not force:
+        session_name = name.split(":")[0] if resource_type == "Window" else name
+        info_str = _session_info_str(session_name)
+        raise ValueError(
+            f"{resource_type} '{name}' is {EXTERNAL} (not created by MCP).\n"
+            f"Use force=True to override (requires user confirmation).\n\n"
+            f"{info_str}"
+        )
+
+
+def _list_windows(session: str) -> list[str]:
+    """List window names in a tmux session."""
+    result = subprocess.run(
+        ["tmux", "list-windows", "-t", f"={session}", "-F", "#{window_name}"],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        return []
+    return [w.strip() for w in result.stdout.strip().split('\n') if w.strip()]
+
+
+def _find_active_task_on_pane(pane: str) -> tuple[str, dict] | None:
+    """Find task on a pane. Running task takes priority, then most recent completed."""
+    latest = None
+    latest_time = 0
+    for task_id, task in _tasks.items():
+        if task["pane"] == pane:
+            _, completed = check_task_output(task["pane"], task["begin"], task["end"])
+            if not completed:
+                return task_id, task
+            if task["start_time"] > latest_time:
+                latest_time = task["start_time"]
+                latest = (task_id, task)
+    return latest
+
+
+def _resolve_task_id(task_id: str | None, pane: str | None) -> str:
+    """Resolve task_id from either direct ID or pane lookup."""
+    if task_id is not None and pane is not None:
+        raise ValueError("Use 'task_id' or 'pane', not both")
+    if task_id is not None:
+        return task_id
+    if pane is not None:
+        check_pane_registered(pane)
+        result = _find_active_task_on_pane(pane)
+        if result is None:
+            raise ValueError(f"No task found on pane '{pane}'")
+        return result[0]
+    raise ValueError("Either 'task_id' or 'pane' must be provided")
+
+
+def _resolve_task_ids_from_panes(panes: list[str]) -> list[str]:
+    """Resolve task IDs from a list of panes."""
+    result = []
+    for p in panes:
+        check_pane_registered(p)
+        active = _find_active_task_on_pane(p)
+        if active is None:
+            raise ValueError(f"No task found on pane '{p}'")
+        result.append(active[0])
+    return result
+
+
+def _cleanup_session_resources(name: str) -> None:
+    """Clean up tasks, panes, and registry when a session is deleted."""
+    for task_id in list(_tasks.keys()):
+        task = _tasks[task_id]
+        try:
+            session, _, _ = parse_pane_id(task["pane"])
+        except (ValueError, IndexError):
+            continue
+        if session == name:
+            _finalize_task(task)
+            del _tasks[task_id]
+    for pane in list(_working_panes.keys()):
+        try:
+            session, _, _ = parse_pane_id(pane)
+        except (ValueError, IndexError):
+            continue
+        if session == name:
+            del _working_panes[pane]
+    if name in _sessions:
+        del _sessions[name]
+
+
+def _cleanup_window_resources(session: str, window: str) -> None:
+    """Clean up tasks, panes, and registry when a window is deleted."""
+    prefix = f"{session}:{window}."
+    for task_id in list(_tasks.keys()):
+        if _tasks[task_id]["pane"].startswith(prefix):
+            _finalize_task(_tasks[task_id])
+            del _tasks[task_id]
+    for pane in list(_working_panes.keys()):
+        if pane.startswith(prefix):
+            del _working_panes[pane]
+    if session in _sessions and window in _sessions[session]["windows"]:
+        del _sessions[session]["windows"][window]
+
+
+# =============================================================================
 # Blocking tools (original)
 # =============================================================================
 
@@ -574,6 +726,7 @@ async def _blocking_on_pane(p: str, code: str, send_fn, timeout: float, filter_k
             "command": code, "lock": lock
         }
         converted = True
+        threading.Thread(target=_watch_task_completion, args=(task_id,), daemon=True).start()
         return f"[timeout → task] {task_id}"
     except asyncio.CancelledError:
         _tasks[task_id] = {
@@ -582,6 +735,7 @@ async def _blocking_on_pane(p: str, code: str, send_fn, timeout: float, filter_k
             "command": code, "lock": lock
         }
         converted = True
+        threading.Thread(target=_watch_task_completion, args=(task_id,), daemon=True).start()
         raise
     finally:
         if not converted:
@@ -796,6 +950,32 @@ async def xsh(
 # Non-blocking tools (background execution)
 # =============================================================================
 
+def _finalize_task(task: dict) -> None:
+    """Record end_time and release lock. Safe to call from multiple threads."""
+    if "end_time" not in task:
+        task["end_time"] = time.time()
+    lock = task.pop("lock", None)
+    if lock is not None:
+        lock.release()
+
+
+def _watch_task_completion(task_id: str) -> None:
+    """Background thread: poll for end marker and finalize task."""
+    task = _tasks.get(task_id)
+    if not task:
+        return
+    while task_id in _tasks:
+        try:
+            _, completed = check_task_output(task["pane"], task["begin"], task["end"])
+        except Exception:
+            time.sleep(1)
+            continue
+        if completed:
+            _finalize_task(task)
+            return
+        time.sleep(1)
+
+
 def _start_on_pane(p: str, code: str, task_type: str, send_fn) -> str:
     """Start a non-blocking task on a single pane. Returns status string."""
     if not check_session(p):
@@ -817,6 +997,8 @@ def _start_on_pane(p: str, code: str, task_type: str, send_fn) -> str:
         "command": code,
         "lock": lock
     }
+
+    threading.Thread(target=_watch_task_completion, args=(task_id,), daemon=True).start()
 
     return f"{p}: {task_id} (started)"
 
@@ -866,6 +1048,7 @@ async def xpy_start(
         "pane": pane, "begin": begin, "end": end,
         "start_time": time.time(), "type": "python", "command": code, "lock": lock
     }
+    threading.Thread(target=_watch_task_completion, args=(task_id,), daemon=True).start()
     return f"Started task {task_id} on {pane}"
 
 
@@ -895,6 +1078,7 @@ def xtcl_start(pane: str = None, code: str = "", panes: list[str] = None) -> str
         "pane": pane, "begin": begin, "end": end,
         "start_time": time.time(), "type": "tcl", "command": code, "lock": lock
     }
+    threading.Thread(target=_watch_task_completion, args=(task_id,), daemon=True).start()
     return f"Started task {task_id} on {pane}"
 
 
@@ -940,31 +1124,32 @@ async def xsh_start(
         "pane": pane, "begin": begin, "end": end,
         "start_time": time.time(), "type": "shell", "command": code, "lock": lock
     }
+    threading.Thread(target=_watch_task_completion, args=(task_id,), daemon=True).start()
     return f"Started task {task_id} on {pane}"
 
 
 @mcp.tool()
-def task_status(task_id: str) -> str:
+def task_status(task_id: str = None, pane: str = None) -> str:
     """Check task status (non-blocking). Returns status and elapsed time only.
 
     Args:
         task_id: Task ID from xpy_start, xtcl_start, or xsh_start
+        pane: Pane to look up active task (use task_id OR pane, not both)
     """
-    if task_id not in _tasks:
-        raise ValueError(f"Task '{task_id}' not found")
+    resolved_id = _resolve_task_id(task_id, pane)
+    if resolved_id not in _tasks:
+        raise ValueError(f"Task '{resolved_id}' not found")
 
-    task = _tasks[task_id]
+    task = _tasks[resolved_id]
     _, completed = check_task_output(task["pane"], task["begin"], task["end"])
+
+    if completed:
+        _finalize_task(task)
+        elapsed = task["end_time"] - task["start_time"]
+        return f"[completed] {elapsed:.1f}s"
+
     elapsed = time.time() - task["start_time"]
-
-    status = "completed" if completed else "running"
-
-    # Auto-release lock when completed
-    if completed and "lock" in task:
-        task["lock"].release()
-        del task["lock"]
-
-    return f"[{status}] {elapsed:.1f}s"
+    return f"[running] {elapsed:.1f}s"
 
 
 def _get_single_task_output(
@@ -980,9 +1165,8 @@ def _get_single_task_output(
     task = _tasks[tid]
     output, completed = check_task_output(task["pane"], task["begin"], task["end"])
 
-    if completed and "lock" in task:
-        task["lock"].release()
-        del task["lock"]
+    if completed:
+        _finalize_task(task)
 
     if not output:
         return output
@@ -1027,6 +1211,8 @@ def _get_single_task_output(
 def task_output(
     task_id: str = None,
     task_ids: list[str] = None,
+    pane: str = None,
+    panes: list[str] = None,
     tail: int = 0,
     head: int = None,
     range: str = None,
@@ -1055,6 +1241,8 @@ def task_output(
     Args:
         task_id: Single task ID (use task_id OR task_ids, not both)
         task_ids: Multiple task IDs to get output simultaneously
+        pane: Look up active task on this pane (alternative to task_id)
+        panes: Look up active tasks on these panes (alternative to task_ids)
         tail: If > 0, return only the last N lines (default: 0 = all)
         head: If provided, return only the first N lines
         range: Line range, e.g., "10:20" (0-indexed, within marker output)
@@ -1078,8 +1266,15 @@ def task_output(
         command_prefix: Prefix for include_command (default: "$ "). E.g., "pt_shell> ", ">>> "
         markdown: If True, wrap output in ```lang ... ``` code block (when saving)
     """
-    if (task_id is None) == (task_ids is None):
-        raise ValueError("Use 'task_id' or 'task_ids', not both")
+    # Resolve pane/panes to task_id/task_ids
+    if pane is not None:
+        task_id = _resolve_task_id(None, pane)
+    if panes is not None:
+        task_ids = _resolve_task_ids_from_panes(panes)
+
+    specified = sum(x is not None for x in [task_id, task_ids])
+    if specified != 1:
+        raise ValueError("Exactly one of task_id/task_ids/pane/panes must be specified")
 
     fkw = dict(grep=grep, v=v, i=i, w=w, F=F, m=m, A=A, B=B, C=C, n=n, uniq=uniq, strip_tqdm=strip_tqdm)
 
@@ -1107,27 +1302,38 @@ async def _wait_single_task(task_id: str, timeout: float) -> str:
         await asyncio.sleep(0.1)
         _, completed = check_task_output(task["pane"], task["begin"], task["end"])
         if completed:
-            if "lock" in task:
-                task["lock"].release()
-                del task["lock"]
-            elapsed = time.time() - task["start_time"]
+            _finalize_task(task)
+            elapsed = task["end_time"] - task["start_time"]
             return f"[completed] {elapsed:.1f}s"
 
     return f"[timeout] {timeout}s"
 
 
 @mcp.tool()
-async def task_wait(task_id: str = None, task_ids: list[str] = None, timeout: float = 60.0, race: bool = False) -> str:
+async def task_wait(
+    task_id: str = None, task_ids: list[str] = None,
+    pane: str = None, panes: list[str] = None,
+    timeout: float = 60.0, race: bool = False
+) -> str:
     """Wait for task completion (blocking). Returns status only.
 
     Args:
         task_id: Single task ID (mutually exclusive with task_ids)
         task_ids: Multiple task IDs to wait simultaneously (mutually exclusive with task_id)
+        pane: Look up active task on this pane (alternative to task_id)
+        panes: Look up active tasks on these panes (alternative to task_ids)
         timeout: Max wait time in seconds
         race: If True with task_ids, return when ANY task completes (default: wait for ALL)
     """
-    if (task_id is None) == (task_ids is None):
-        raise ValueError("Exactly one of task_id or task_ids must be specified")
+    # Resolve pane/panes to task_id/task_ids
+    if pane is not None:
+        task_id = _resolve_task_id(None, pane)
+    if panes is not None:
+        task_ids = _resolve_task_ids_from_panes(panes)
+
+    specified = sum(x is not None for x in [task_id, task_ids])
+    if specified != 1:
+        raise ValueError("Exactly one of task_id/task_ids/pane/panes must be specified")
 
     if task_id is not None:
         if task_id not in _tasks:
@@ -1178,8 +1384,12 @@ def task_list(all: bool = False) -> str:
 
     lines = []
     for task_id, task in _tasks.items():
-        elapsed = time.time() - task["start_time"]
         _, completed = check_task_output(task["pane"], task["begin"], task["end"])
+        if completed:
+            _finalize_task(task)
+            elapsed = task["end_time"] - task["start_time"]
+        else:
+            elapsed = time.time() - task["start_time"]
         if completed and not all:
             continue
         status = "completed" if completed else "running"
@@ -1204,9 +1414,7 @@ def task_cancel(task_id: str) -> str:
         raise ValueError(f"Task '{task_id}' not found")
 
     task = _tasks[task_id]
-    # Release lock
-    if "lock" in task:
-        task["lock"].release()
+    _finalize_task(task)
     del _tasks[task_id]
     return f"Task {task_id} removed"
 
@@ -1216,24 +1424,260 @@ def task_cancel(task_id: str) -> str:
 # =============================================================================
 
 @mcp.tool()
-def tmux_sessions() -> str:
-    """List available tmux sessions."""
-    sessions = list_sessions()
+def ls(session: str = None, window: str = None) -> str:
+    """List tmux sessions/windows/panes as a tree.
 
-    if not sessions:
+    Shows process, cwd, ownership, registration, and active tasks.
+    Auto-cleans orphaned pane registrations.
+
+    Args:
+        session: Filter to specific session
+        window: Filter to specific window (requires session)
+    """
+    if window and not session:
+        raise ValueError("'window' requires 'session'")
+
+    # Gather all pane info from tmux
+    fmt = "#{session_name}|#{window_index}|#{window_name}|#{automatic-rename}|#{pane_index}|#{pane_tty}|#{pane_current_path}"
+    result = subprocess.run(
+        ["tmux", "list-panes", "-a", "-F", fmt],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
         return "No tmux sessions found"
 
-    lines = ["Available tmux sessions:"]
-    for s in sessions:
-        status = "attached" if s["attached"] else "detached"
-        lines.append(f"  {s['name']} ({s['windows']} windows, {status})")
+    # Parse tmux data
+    pane_data = []  # [(session, widx, wname, auto_rename, pidx, tty, cwd)]
+    live_pane_ids = set()
+    for line in result.stdout.strip().split('\n'):
+        if not line:
+            continue
+        parts = line.split('|')
+        if len(parts) < 7:
+            continue
+        sess, widx, wname, auto_rename, pidx, tty, cwd = parts[0], parts[1], parts[2], parts[3], parts[4], parts[5], parts[6]
+        if session and sess != session:
+            continue
+        if window and wname != window and widx != window:
+            continue
+        # Get foreground process
+        proc = "-"
+        if tty:
+            try:
+                ps_result = subprocess.run(
+                    ["ps", "-t", tty, "-o", "stat=,args="],
+                    capture_output=True, text=True, timeout=2
+                )
+                for ps_line in ps_result.stdout.strip().split('\n'):
+                    ps_line = ps_line.strip()
+                    if ps_line and '+' in ps_line.split()[0]:
+                        proc = ps_line.split(None, 1)[1] if len(ps_line.split(None, 1)) > 1 else "-"
+                        break
+            except Exception:
+                pass
+        pane_id = f"{sess}:{wname}.{pidx}"
+        pane_id_idx = f"{sess}:{widx}.{pidx}"
+        live_pane_ids.add(pane_id)
+        live_pane_ids.add(pane_id_idx)
+        pane_data.append((sess, widx, wname, auto_rename, pidx, proc, cwd))
 
-    return '\n'.join(lines)
+    # Auto-clean orphaned registrations (only when no filter applied)
+    if not session and not window:
+        for pane_id in list(_working_panes.keys()):
+            if pane_id not in live_pane_ids:
+                del _working_panes[pane_id]
+
+    # Get session metadata
+    sessions_meta = {}
+    for s in list_sessions():
+        sessions_meta[s["name"]] = s
+
+    # Build tree output
+    output = []
+    prev_sess = None
+    prev_widx = None
+    for sess, widx, wname, auto_rename, pidx, proc, cwd in pane_data:
+        if sess != prev_sess:
+            meta = sessions_meta.get(sess, {})
+            status = "attached" if meta.get("attached") else "detached"
+            owner = _sessions.get(sess, {}).get("owner", "untracked")
+            output.append(f"{sess} ({status}, {owner})")
+            prev_sess = sess
+            prev_widx = None
+
+        if widx != prev_widx:
+            w_owner = _sessions.get(sess, {}).get("windows", {}).get(wname, {}).get("owner", "")
+            w_owner_str = f" ({w_owner})" if w_owner else ""
+            w_label = widx if auto_rename == "1" else wname
+            output.append(f"  {w_label}:{w_owner_str}")
+            prev_widx = widx
+
+        # Check registration (by name or index)
+        pane_id_name = f"{sess}:{wname}.{pidx}"
+        pane_id_idx = f"{sess}:{widx}.{pidx}"
+        reg_info = _working_panes.get(pane_id_name) or _working_panes.get(pane_id_idx)
+        reg_str = f'  [R: "{reg_info["description"]}"]' if reg_info else ""
+
+        # Check active task
+        task_str = ""
+        for pane_key in [pane_id_name, pane_id_idx]:
+            active = _find_active_task_on_pane(pane_key)
+            if active:
+                tid, t = active
+                _, completed = check_task_output(t["pane"], t["begin"], t["end"])
+                if completed:
+                    _finalize_task(t)
+                    elapsed = t["end_time"] - t["start_time"]
+                else:
+                    elapsed = time.time() - t["start_time"]
+                st = "completed" if completed else "running"
+                task_str = f"  [task: {tid} {st} {elapsed:.0f}s]"
+                break
+
+        # Shorten home dir
+        cwd = cwd.replace(os.path.expanduser("~"), "~")
+        output.append(f"    {pidx}: {proc}  \"{cwd}\"{reg_str}{task_str}")
+
+    if not output:
+        if session:
+            return f"Session '{session}' not found"
+        return "No tmux sessions found"
+
+    return '\n'.join(output)
 
 
 @mcp.tool()
-def set_working_pane(pane: str, description: str) -> str:
-    """Register a pane for use. Must be called before using other tools.
+def create_session(name: str, windows: list[str] = None, start_dir: str = None) -> str:
+    """Create a new tmux session (managed). Auto-registers all panes.
+
+    Args:
+        name: Session name
+        windows: Window names to create (default: one window named "main")
+        start_dir: Starting directory for the session
+    """
+    if check_session(name):
+        raise ValueError(
+            f"Session '{name}' already exists.\n\n"
+            f"{_session_info_str(name)}"
+        )
+
+    if windows is None:
+        windows = ["main"]
+
+    cmd = ["tmux", "new-session", "-d", "-s", name, "-n", windows[0]]
+    if start_dir:
+        cmd.extend(["-c", os.path.expanduser(start_dir)])
+    subprocess.run(cmd, capture_output=True)
+
+    for w_name in windows[1:]:
+        w_cmd = ["tmux", "new-window", "-t", name, "-n", w_name]
+        if start_dir:
+            w_cmd.extend(["-c", os.path.expanduser(start_dir)])
+        subprocess.run(w_cmd, capture_output=True)
+
+    _sessions[name] = {
+        "owner": MANAGED,
+        "created_at": time.time(),
+        "windows": {w: {"owner": MANAGED} for w in windows}
+    }
+
+    for w_name in windows:
+        pane_id = f"{name}:{w_name}.0"
+        _working_panes[pane_id] = {"description": f"managed ({w_name})", "owner": MANAGED}
+
+    pane_list = ', '.join(f"{name}:{w}.0" for w in windows)
+    return f"Created session '{name}' with {len(windows)} window(s).\nRegistered panes: {pane_list}"
+
+
+@mcp.tool()
+def kill_session(name: str, force: bool = False) -> str:
+    """Kill a tmux session.
+
+    Managed sessions (created by MCP) are killed immediately.
+    External sessions require force=True (user confirmation via Claude Code).
+
+    Args:
+        name: Session name to kill
+        force: Required for external sessions
+    """
+    if not check_session(name):
+        raise ValueError(f"Session '{name}' does not exist")
+
+    owner = _sessions.get(name, {}).get("owner", EXTERNAL)
+    _check_ownership("Session", name, owner, force)
+
+    _cleanup_session_resources(name)
+    subprocess.run(["tmux", "kill-session", "-t", f"={name}"], capture_output=True)
+
+    return f"Killed session '{name}'"
+
+
+@mcp.tool()
+def create_window(session: str, name: str, start_dir: str = None) -> str:
+    """Create a new window in an existing session (managed). Auto-registers pane.
+
+    Args:
+        session: Session name
+        name: Window name
+        start_dir: Starting directory
+    """
+    if not check_session(session):
+        raise ValueError(f"Session '{session}' does not exist")
+
+    existing = _list_windows(session)
+    if name in existing:
+        raise ValueError(f"Window '{name}' already exists in session '{session}'")
+
+    cmd = ["tmux", "new-window", "-t", session, "-n", name]
+    if start_dir:
+        cmd.extend(["-c", os.path.expanduser(start_dir)])
+    subprocess.run(cmd, capture_output=True)
+
+    if session not in _sessions:
+        _sessions[session] = {
+            "owner": EXTERNAL,
+            "created_at": time.time(),
+            "windows": {}
+        }
+    _sessions[session]["windows"][name] = {"owner": MANAGED}
+
+    pane_id = f"{session}:{name}.0"
+    _working_panes[pane_id] = {"description": f"managed ({name})", "owner": MANAGED}
+
+    return f"Created window '{name}' in session '{session}'.\nRegistered pane: {pane_id}"
+
+
+@mcp.tool()
+def kill_window(session: str, window: str, force: bool = False) -> str:
+    """Kill a window in a tmux session.
+
+    Managed windows are killed immediately.
+    External windows require force=True.
+
+    Args:
+        session: Session name
+        window: Window name
+        force: Required for external windows
+    """
+    if not check_session(session):
+        raise ValueError(f"Session '{session}' does not exist")
+
+    existing = _list_windows(session)
+    if window not in existing:
+        raise ValueError(f"Window '{window}' not found in session '{session}'")
+
+    owner = _sessions.get(session, {}).get("windows", {}).get(window, {}).get("owner", EXTERNAL)
+    _check_ownership("Window", f"{session}:{window}", owner, force)
+
+    _cleanup_window_resources(session, window)
+    subprocess.run(["tmux", "kill-window", "-t", f"={session}:{window}"], capture_output=True)
+
+    return f"Killed window '{window}' in session '{session}'"
+
+
+@mcp.tool()
+def set_pane(pane: str, description: str) -> str:
+    """Register a pane for use. Re-calling updates description.
 
     Args:
         pane: tmux target (e.g., t1:1.0, t1:2.1)
@@ -1242,25 +1686,14 @@ def set_working_pane(pane: str, description: str) -> str:
     if not check_session(pane):
         raise ValueError(f"Pane '{pane}' not found in tmux")
 
-    _working_panes[pane] = description
+    _working_panes[pane] = {"description": description, "owner": EXTERNAL}
+    _auto_register_session_window(pane)
     return f"Registered: {pane} ({description})"
 
 
 @mcp.tool()
-def get_working_panes() -> str:
-    """Get all registered working panes."""
-    if not _working_panes:
-        return "No panes registered. Use set_working_pane() to register."
-
-    lines = ["Registered panes:"]
-    for pane, desc in _working_panes.items():
-        lines.append(f"  {pane}: {desc}")
-    return '\n'.join(lines)
-
-
-@mcp.tool()
-def remove_working_pane(pane: str) -> str:
-    """Unregister a working pane.
+def remove_pane(pane: str) -> str:
+    """Unregister a pane.
 
     Args:
         pane: tmux target to unregister
@@ -1270,21 +1703,6 @@ def remove_working_pane(pane: str) -> str:
 
     del _working_panes[pane]
     return f"Removed: {pane}"
-
-
-@mcp.tool()
-def update_pane_description(pane: str, description: str) -> str:
-    """Update the description of a registered pane.
-
-    Args:
-        pane: Registered pane name
-        description: New description
-    """
-    if pane not in _working_panes:
-        raise ValueError(f"Pane '{pane}' is not registered")
-
-    _working_panes[pane] = description
-    return f"Updated: {pane} ({description})"
 
 
 async def peek_output(pane: str, begin: str, wait: float) -> str:
@@ -1616,9 +2034,7 @@ def task_cancel_all() -> str:
 
     count = len(_tasks)
     for task_id in list(_tasks.keys()):
-        task = _tasks[task_id]
-        if "lock" in task:
-            task["lock"].release()
+        _finalize_task(_tasks[task_id])
         del _tasks[task_id]
 
     return f"Cancelled {count} task(s)"
