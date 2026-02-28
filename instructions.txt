@@ -21,6 +21,9 @@ This describes how you use tmux-injector tools. This is how the system works.
 ├─ Send special keys (C-c, Escape, arrows)
 │   └─→ send_keys (no Enter by default)
 │
+├─ Reset pane (kill process, fresh shell)
+│   └─→ respawn_pane (cleans tasks/locks, keeps registration)
+│
 └─ Check current screen
     └─→ capture_pane
 
@@ -97,6 +100,7 @@ State changes to remember:
 - xsh_peek(pane, "openroad") → pane is now TCL (%)
 - xtcl_peek(pane, "exit") → pane is now bash ($)
 - send_keys("C-c C-c") → uncertain, capture_pane to confirm
+- respawn_pane(pane) → pane is now bash ($), all tasks cleaned
 
 capture_pane is used when:
 - First time accessing a pane in this conversation
