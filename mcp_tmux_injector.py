@@ -723,6 +723,20 @@ def _cleanup_session_resources(name: str) -> None:
         del _sessions[name]
 
 
+def _cleanup_pane_tasks(pane: str) -> int:
+    """Finalize and remove all tasks for a specific pane. Returns count."""
+    count = 0
+    for task_id in list(_tasks.keys()):
+        task = _tasks.get(task_id)
+        if not task:
+            continue
+        if task["pane"] == pane:
+            _finalize_task(task)
+            _tasks.pop(task_id, None)
+            count += 1
+    return count
+
+
 def _cleanup_window_resources(session: str, window: str) -> None:
     """Clean up tasks, panes, and registry when a window is deleted."""
     prefix = f"{session}:{window}."
@@ -1852,6 +1866,41 @@ def remove_pane(pane: str) -> str:
 
     del _working_panes[pane]
     return f"Removed: {pane}"
+
+
+def _respawn_single(pane: str, start_dir: str = None, command: str = None) -> str:
+    """Respawn a single registered pane. Returns status string."""
+    cleaned = _cleanup_pane_tasks(pane)
+    cmd = ["tmux", "respawn-pane", "-k", "-t", pane]
+    if start_dir:
+        cmd.extend(["-c", os.path.expanduser(start_dir)])
+    if command:
+        cmd.append(command)
+    subprocess.run(cmd, capture_output=True)
+    desc = _working_panes[pane]["description"]
+    parts = [f"Respawned: {pane} ({desc})"]
+    if cleaned:
+        parts.append(f"Cleaned {cleaned} task(s)")
+    return "\n".join(parts)
+
+
+@mcp.tool()
+def respawn_pane(pane: str = None, panes: list[str] = None, start_dir: str = None, command: str = None) -> str:
+    """Kill the running process in a pane and start a fresh shell.
+    Cleans up associated tasks and locks. Registration (description/owner) is preserved.
+
+    Args:
+        pane: Single pane to respawn
+        panes: Multiple panes to respawn in parallel
+        start_dir: Working directory for the new shell
+        command: Shell command to run instead of default shell
+    """
+    multi = _resolve_panes(pane, panes)
+    if multi is not None:
+        results = {p: _respawn_single(p, start_dir, command) for p in multi}
+        return _format_multi_result(results)
+    check_pane_registered(pane)
+    return _respawn_single(pane, start_dir, command)
 
 
 async def peek_output(pane: str, begin: str, wait: float) -> str:
