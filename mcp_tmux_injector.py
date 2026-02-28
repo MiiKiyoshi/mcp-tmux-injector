@@ -163,9 +163,12 @@ def acquire_pane_lock(pane: str) -> threading.Lock:
         return lock
 
     # Check if existing task is actually completed
-    for task_id, task in _tasks.items():
+    for task_id, task in list(_tasks.items()):
         if task['pane'] == pane and 'lock' in task:
-            _, completed = check_task_output(pane, task['begin'], task['end'])
+            if "end_time" in task:
+                completed = True
+            else:
+                _, completed = check_task_output(pane, task['begin'], task['end'])
             if completed:
                 _finalize_task(task)
                 if lock.acquire(blocking=False):
@@ -184,13 +187,24 @@ def run_tmux_cmd(args: list[str], capture: bool = True) -> str:
     return result.stdout if capture else ""
 
 
+_session_cache: dict[str, tuple[bool, float]] = {}
+_SESSION_CACHE_TTL = 2.0
+
+
 def check_session(session: str) -> bool:
-    """Check if tmux session exists (exact match)."""
+    """Check if tmux session exists (exact match). Cached for 2s per session."""
+    sess_name = session.split(':')[0]
+    now = time.time()
+    cached = _session_cache.get(sess_name)
+    if cached and now - cached[1] < _SESSION_CACHE_TTL:
+        return cached[0]
     result = subprocess.run(
-        ["tmux", "has-session", "-t", f"={session}"],
+        ["tmux", "has-session", "-t", f"={sess_name}"],
         capture_output=True
     )
-    return result.returncode == 0
+    exists = result.returncode == 0
+    _session_cache[sess_name] = (exists, now)
+    return exists
 
 
 def generate_marker() -> tuple[str, str]:
@@ -512,13 +526,19 @@ def apply_output_filters(
         eff_suffix = (suffix or '').replace('\\n', '\n').replace('\\t', '\t')
         save_content = eff_prefix + result + eff_suffix
         save_to_file(save_content, save, append)
-        return f"Saved to {save}"
+        return f"Saved to {save} ({len(lines)} lines)"
 
     return result
 
 
 def check_task_output(session: str, begin: str, end: str) -> tuple[str, bool]:
     """Check current output for a task. Returns (output, is_complete)."""
+    for n_lines in [1000, 4000, 16000]:
+        raw = run_tmux_cmd(["capture-pane", "-t", session, "-p", "-S", f"-{n_lines}"])
+        output, completed = extract_output(raw, begin, end)
+        if completed or begin in raw:
+            return output, completed
+    # fallback: full scrollback
     raw = run_tmux_cmd(["capture-pane", "-t", session, "-p", "-S", "-"])
     return extract_output(raw, begin, end)
 
@@ -529,6 +549,8 @@ async def capture_output_blocking(session: str, begin: str, end: str, timeout: f
 
     while time.time() - start_time < timeout:
         await asyncio.sleep(0.1)
+        if not _check_end_marker(session, end):
+            continue
         output, completed = check_task_output(session, begin, end)
         if completed:
             return output
@@ -630,9 +652,18 @@ def _find_active_task_on_pane(pane: str) -> tuple[str, dict] | None:
     """Find task on a pane. Running task takes priority, then most recent completed."""
     latest = None
     latest_time = 0
-    for task_id, task in _tasks.items():
+    for task_id, task in list(_tasks.items()):
         if task["pane"] == pane:
-            _, completed = check_task_output(task["pane"], task["begin"], task["end"])
+            if "end_time" in task:
+                completed = True
+            else:
+                # Lightweight check: only scan tail for end marker
+                completed = _check_end_marker(task["pane"], task["end"])
+                if completed:
+                    # Full extraction and finalize
+                    output, _ = check_task_output(task["pane"], task["begin"], task["end"])
+                    task["cached_output"] = output
+                    _finalize_task(task)
             if not completed:
                 return task_id, task
             if task["start_time"] > latest_time:
@@ -671,14 +702,16 @@ def _resolve_task_ids_from_panes(panes: list[str]) -> list[str]:
 def _cleanup_session_resources(name: str) -> None:
     """Clean up tasks, panes, and registry when a session is deleted."""
     for task_id in list(_tasks.keys()):
-        task = _tasks[task_id]
+        task = _tasks.get(task_id)
+        if not task:
+            continue
         try:
             session, _, _ = parse_pane_id(task["pane"])
         except (ValueError, IndexError):
             continue
         if session == name:
             _finalize_task(task)
-            del _tasks[task_id]
+            _tasks.pop(task_id, None)
     for pane in list(_working_panes.keys()):
         try:
             session, _, _ = parse_pane_id(pane)
@@ -694,9 +727,12 @@ def _cleanup_window_resources(session: str, window: str) -> None:
     """Clean up tasks, panes, and registry when a window is deleted."""
     prefix = f"{session}:{window}."
     for task_id in list(_tasks.keys()):
-        if _tasks[task_id]["pane"].startswith(prefix):
-            _finalize_task(_tasks[task_id])
-            del _tasks[task_id]
+        task = _tasks.get(task_id)
+        if not task:
+            continue
+        if task["pane"].startswith(prefix):
+            _finalize_task(task)
+            _tasks.pop(task_id, None)
     for pane in list(_working_panes.keys()):
         if pane.startswith(prefix):
             del _working_panes[pane]
@@ -708,7 +744,11 @@ def _cleanup_window_resources(session: str, window: str) -> None:
 # Blocking tools (original)
 # =============================================================================
 
-async def _blocking_on_pane(p: str, code: str, send_fn, timeout: float, filter_kwargs: dict, task_type: str = "shell") -> str:
+_LARGE_OUTPUT_THRESHOLD = 200
+_LARGE_OUTPUT_PREVIEW = 20
+
+
+async def _blocking_on_pane(p: str, code: str, send_fn, timeout: float, filter_kwargs: dict, task_type: str = "shell", tail: int = 0, head: int = None, force: bool = False) -> str:
     """Execute blocking command on a single pane and return filtered output."""
     lock = acquire_pane_lock(p)
     task_id, begin, end = generate_task_id_and_marker()
@@ -718,8 +758,33 @@ async def _blocking_on_pane(p: str, code: str, send_fn, timeout: float, filter_k
         send_fn(p, code, begin, end)
         output = await capture_output_blocking(p, begin, end, timeout)
         lines = output.split('\n') if output else []
-        return apply_output_filters(lines, n_negative=False, **filter_kwargs)
-    except TimeoutError:
+        if head is not None and head > 0:
+            lines = lines[:head]
+        elif tail > 0 and len(lines) > tail:
+            lines = lines[-tail:]
+        filtered = apply_output_filters(lines, n_negative=False, **filter_kwargs)
+
+        filtered_lines = filtered.split('\n') if filtered else []
+        if not force and len(filtered_lines) > _LARGE_OUTPUT_THRESHOLD:
+            _tasks[task_id] = {
+                "pane": p, "begin": begin, "end": end,
+                "start_time": start_time, "end_time": time.time(),
+                "type": task_type, "command": code,
+                "cached_output": output
+            }
+            _cleanup_completed_tasks()
+            n = _LARGE_OUTPUT_PREVIEW
+            head_part = '\n'.join(filtered_lines[:n])
+            tail_part = '\n'.join(filtered_lines[-n:])
+            omitted = len(filtered_lines) - n * 2
+            return (
+                f"[Large output: {len(filtered_lines)} lines → {task_id}]\n"
+                f"task_output(task_id=\"{task_id}\", tail=/head=/range=) to retrieve.\n\n"
+                f"{head_part}\n\n... {omitted} lines omitted ...\n\n{tail_part}"
+            )
+
+        return filtered
+    except (TimeoutError, asyncio.CancelledError) as exc:
         _tasks[task_id] = {
             "pane": p, "begin": begin, "end": end,
             "start_time": start_time, "type": task_type,
@@ -727,22 +792,21 @@ async def _blocking_on_pane(p: str, code: str, send_fn, timeout: float, filter_k
         }
         converted = True
         threading.Thread(target=_watch_task_completion, args=(task_id,), daemon=True).start()
-        return f"[timeout → task] {task_id}"
-    except asyncio.CancelledError:
-        _tasks[task_id] = {
-            "pane": p, "begin": begin, "end": end,
-            "start_time": start_time, "type": task_type,
-            "command": code, "lock": lock
-        }
-        converted = True
-        threading.Thread(target=_watch_task_completion, args=(task_id,), daemon=True).start()
-        raise
+        if isinstance(exc, asyncio.CancelledError):
+            raise
+        try:
+            partial, _ = check_task_output(p, begin, end)
+            n_lines = len(partial.split('\n')) if partial else 0
+            progress = f" (output: {n_lines} lines so far)" if n_lines > 0 else ""
+        except Exception:
+            progress = ""
+        return f"[timeout → task] {task_id}{progress}"
     finally:
         if not converted:
             lock.release()
 
 
-async def _blocking_multi(target_panes: list[str], code: str, send_fn, timeout: float, fkw: dict, task_type: str = "shell") -> str:
+async def _blocking_multi(target_panes: list[str], code: str, send_fn, timeout: float, fkw: dict, task_type: str = "shell", tail: int = 0, head: int = None, force: bool = False) -> str:
     """Run blocking command on multiple panes with graceful skip for missing panes."""
     results = {}
     coros = {}
@@ -750,11 +814,11 @@ async def _blocking_multi(target_panes: list[str], code: str, send_fn, timeout: 
         if not check_session(p):
             results[p] = "not found (skipped)"
         else:
-            coros[p] = _blocking_on_pane(p, code, send_fn, timeout, fkw, task_type=task_type)
+            coros[p] = _blocking_on_pane(p, code, send_fn, timeout, fkw, task_type=task_type, tail=tail, head=head, force=force)
     if coros:
         results_list = await asyncio.gather(*coros.values(), return_exceptions=True)
         for p, result in zip(coros.keys(), results_list):
-            results[p] = str(result) if isinstance(result, Exception) else result
+            results[p] = str(result) if isinstance(result, BaseException) else result
     return _format_multi_result(results)
 
 
@@ -764,6 +828,9 @@ async def xpy(
     code: str = None,
     file: str = None,
     timeout: float = 60.0,
+    tail: int = 0,
+    head: int = None,
+    force: bool = False,
     grep: str = None,
     v: str = None,
     i: bool = False,
@@ -786,6 +853,9 @@ async def xpy(
         code: Python code to execute
         file: Python file to execute (alternative to code)
         timeout: Timeout in seconds (default: 60)
+        tail: If > 0, return only the last N lines (default: 0 = all)
+        head: If provided, return only the first N lines
+        force: If True, return full output without truncation (default: False)
         grep: Filter lines matching this regex pattern
         v: Exclude lines matching this regex pattern (like grep -v)
         i: Case insensitive matching (like grep -i)
@@ -807,7 +877,7 @@ async def xpy(
         abs_path = _resolve_file_path(file, client_cwd)
         if not os.path.isfile(abs_path):
             raise FileNotFoundError(f"File not found: {abs_path}")
-        code = f"exec(open('{abs_path}').read())"
+        code = f"exec(compile(open('{abs_path}').read(), '{abs_path}', 'exec'))"
 
     if not code:
         raise ValueError("Either 'code' or 'file' must be provided")
@@ -818,12 +888,12 @@ async def xpy(
     fkw = dict(grep=grep, v=v, i=i, w=w, F=F, m=m, A=A, B=B, C=C, n=n, uniq=uniq, strip_tqdm=strip_tqdm)
 
     if target_panes is not None:
-        return await _blocking_multi(target_panes, code, send_python_code, timeout, fkw, task_type="python")
+        return await _blocking_multi(target_panes, code, send_python_code, timeout, fkw, task_type="python", tail=tail, head=head, force=force)
 
     check_pane_registered(pane)
     if not check_session(pane):
         raise ValueError(f"Pane '{pane}' not found in tmux")
-    return await _blocking_on_pane(pane, code, send_python_code, timeout, fkw, task_type="python")
+    return await _blocking_on_pane(pane, code, send_python_code, timeout, fkw, task_type="python", tail=tail, head=head, force=force)
 
 
 @mcp.tool()
@@ -831,6 +901,9 @@ async def xtcl(
     pane: str = None,
     code: str = "",
     timeout: float = 60.0,
+    tail: int = 0,
+    head: int = None,
+    force: bool = False,
     grep: str = None,
     v: str = None,
     i: bool = False,
@@ -851,6 +924,9 @@ async def xtcl(
         pane: Single tmux pane (e.g., t1:1.0)
         code: TCL code to execute
         timeout: Timeout in seconds (default: 60)
+        tail: If > 0, return only the last N lines (default: 0 = all)
+        head: If provided, return only the first N lines
+        force: If True, return full output without truncation (default: False)
         grep: Filter lines matching this regex pattern
         v: Exclude lines matching this regex pattern (like grep -v)
         i: Case insensitive matching (like grep -i)
@@ -873,12 +949,12 @@ async def xtcl(
     fkw = dict(grep=grep, v=v, i=i, w=w, F=F, m=m, A=A, B=B, C=C, n=n, uniq=uniq, strip_tqdm=strip_tqdm)
 
     if target_panes is not None:
-        return await _blocking_multi(target_panes, code, send_tcl_code, timeout, fkw, task_type="tcl")
+        return await _blocking_multi(target_panes, code, send_tcl_code, timeout, fkw, task_type="tcl", tail=tail, head=head, force=force)
 
     check_pane_registered(pane)
     if not check_session(pane):
         raise ValueError(f"Pane '{pane}' not found in tmux")
-    return await _blocking_on_pane(pane, code, send_tcl_code, timeout, fkw, task_type="tcl")
+    return await _blocking_on_pane(pane, code, send_tcl_code, timeout, fkw, task_type="tcl", tail=tail, head=head, force=force)
 
 
 @mcp.tool()
@@ -887,6 +963,9 @@ async def xsh(
     code: str = None,
     file: str = None,
     timeout: float = 60.0,
+    tail: int = 0,
+    head: int = None,
+    force: bool = False,
     grep: str = None,
     v: str = None,
     i: bool = False,
@@ -909,6 +988,9 @@ async def xsh(
         code: Shell command to execute
         file: Shell script file to execute (alternative to code)
         timeout: Timeout in seconds (default: 60)
+        tail: If > 0, return only the last N lines (default: 0 = all)
+        head: If provided, return only the first N lines
+        force: If True, return full output without truncation (default: False)
         grep: Filter lines matching this regex pattern
         v: Exclude lines matching this regex pattern (like grep -v)
         i: Case insensitive matching (like grep -i)
@@ -938,25 +1020,45 @@ async def xsh(
     fkw = dict(grep=grep, v=v, i=i, w=w, F=F, m=m, A=A, B=B, C=C, n=n, uniq=uniq, strip_tqdm=strip_tqdm)
 
     if target_panes is not None:
-        return await _blocking_multi(target_panes, code, send_shell_code, timeout, fkw)
+        return await _blocking_multi(target_panes, code, send_shell_code, timeout, fkw, tail=tail, head=head, force=force)
 
     check_pane_registered(pane)
     if not check_session(pane):
         raise ValueError(f"Pane '{pane}' not found in tmux")
-    return await _blocking_on_pane(pane, code, send_shell_code, timeout, fkw)
+    return await _blocking_on_pane(pane, code, send_shell_code, timeout, fkw, tail=tail, head=head, force=force)
 
 
 # =============================================================================
 # Non-blocking tools (background execution)
 # =============================================================================
 
+_MAX_COMPLETED_TASKS = 20
+
+
+def _cleanup_completed_tasks():
+    """Remove oldest completed tasks when exceeding _MAX_COMPLETED_TASKS."""
+    completed = [(tid, t) for tid, t in list(_tasks.items()) if "end_time" in t]
+    if len(completed) <= _MAX_COMPLETED_TASKS:
+        return
+    completed.sort(key=lambda x: x[1]["end_time"])
+    for tid, _ in completed[:-_MAX_COMPLETED_TASKS]:
+        _tasks.pop(tid, None)
+
+
 def _finalize_task(task: dict) -> None:
     """Record end_time and release lock. Safe to call from multiple threads."""
     if "end_time" not in task:
         task["end_time"] = time.time()
+        _cleanup_completed_tasks()
     lock = task.pop("lock", None)
     if lock is not None:
         lock.release()
+
+
+def _check_end_marker(pane: str, end: str, tail: int = 200) -> bool:
+    """Lightweight completion check: only look for end marker in tail of scrollback."""
+    raw = run_tmux_cmd(["capture-pane", "-t", pane, "-p", "-S", f"-{tail}"])
+    return end in raw
 
 
 def _watch_task_completion(task_id: str) -> None:
@@ -964,16 +1066,26 @@ def _watch_task_completion(task_id: str) -> None:
     task = _tasks.get(task_id)
     if not task:
         return
+    interval = 1.0
+    max_interval = 30.0
     while task_id in _tasks:
-        try:
-            _, completed = check_task_output(task["pane"], task["begin"], task["end"])
-        except Exception:
-            time.sleep(1)
-            continue
-        if completed:
-            _finalize_task(task)
+        if "end_time" in task:
             return
-        time.sleep(1)
+        try:
+            found = _check_end_marker(task["pane"], task["end"])
+        except Exception:
+            time.sleep(interval)
+            interval = min(interval * 2, max_interval)
+            continue
+        if found:
+            # End marker found — do full extraction once
+            output, completed = check_task_output(task["pane"], task["begin"], task["end"])
+            if completed:
+                task["cached_output"] = output
+                _finalize_task(task)
+                return
+        time.sleep(interval)
+        interval = min(interval * 2, max_interval)
 
 
 def _start_on_pane(p: str, code: str, task_type: str, send_fn) -> str:
@@ -1028,7 +1140,7 @@ async def xpy_start(
         abs_path = _resolve_file_path(file, client_cwd)
         if not os.path.isfile(abs_path):
             raise FileNotFoundError(f"File not found: {abs_path}")
-        code = f"exec(open('{abs_path}').read())"
+        code = f"exec(compile(open('{abs_path}').read(), '{abs_path}', 'exec'))"
 
     if not code:
         raise ValueError("Either 'code' or 'file' must be provided")
@@ -1141,15 +1253,22 @@ def task_status(task_id: str = None, pane: str = None) -> str:
         raise ValueError(f"Task '{resolved_id}' not found")
 
     task = _tasks[resolved_id]
-    _, completed = check_task_output(task["pane"], task["begin"], task["end"])
+    if "end_time" in task:
+        completed = True
+    else:
+        _, completed = check_task_output(task["pane"], task["begin"], task["end"])
+
+    cmd = task.get("command", "")
+    cmd_display = (cmd[:37] + "...") if len(cmd) > 40 else cmd
+    cmd_display = cmd_display.replace('\n', ' ')
 
     if completed:
         _finalize_task(task)
         elapsed = task["end_time"] - task["start_time"]
-        return f"[completed] {elapsed:.1f}s"
+        return f"[completed] {elapsed:.1f}s  {task['pane']}  \"{cmd_display}\""
 
     elapsed = time.time() - task["start_time"]
-    return f"[running] {elapsed:.1f}s"
+    return f"[running] {elapsed:.1f}s  {task['pane']}  \"{cmd_display}\""
 
 
 def _get_single_task_output(
@@ -1163,10 +1282,13 @@ def _get_single_task_output(
         raise ValueError(f"Task '{tid}' not found")
 
     task = _tasks[tid]
-    output, completed = check_task_output(task["pane"], task["begin"], task["end"])
-
-    if completed:
-        _finalize_task(task)
+    if "cached_output" in task:
+        output = task["cached_output"]
+    else:
+        output, completed = check_task_output(task["pane"], task["begin"], task["end"])
+        if completed:
+            task["cached_output"] = output
+            _finalize_task(task)
 
     if not output:
         return output
@@ -1298,13 +1420,21 @@ async def _wait_single_task(task_id: str, timeout: float) -> str:
     task = _tasks[task_id]
     start_time = time.time()
 
+    interval = 0.5
+    max_interval = 10.0
     while time.time() - start_time < timeout:
-        await asyncio.sleep(0.1)
-        _, completed = check_task_output(task["pane"], task["begin"], task["end"])
-        if completed:
-            _finalize_task(task)
+        if "end_time" in task:
             elapsed = task["end_time"] - task["start_time"]
             return f"[completed] {elapsed:.1f}s"
+        await asyncio.sleep(interval)
+        if _check_end_marker(task["pane"], task["end"]):
+            output, completed = check_task_output(task["pane"], task["begin"], task["end"])
+            if completed:
+                task["cached_output"] = output
+                _finalize_task(task)
+                elapsed = task["end_time"] - task["start_time"]
+                return f"[completed] {elapsed:.1f}s"
+        interval = min(interval * 2, max_interval)
 
     return f"[timeout] {timeout}s"
 
@@ -1383,8 +1513,14 @@ def task_list(all: bool = False) -> str:
         return "No tasks"
 
     lines = []
-    for task_id, task in _tasks.items():
-        _, completed = check_task_output(task["pane"], task["begin"], task["end"])
+    for task_id, task in list(_tasks.items()):
+        if "end_time" in task:
+            completed = True
+        else:
+            completed = _check_end_marker(task["pane"], task["end"])
+            if completed:
+                output, _ = check_task_output(task["pane"], task["begin"], task["end"])
+                task["cached_output"] = output
         if completed:
             _finalize_task(task)
             elapsed = task["end_time"] - task["start_time"]
@@ -1415,7 +1551,7 @@ def task_cancel(task_id: str) -> str:
 
     task = _tasks[task_id]
     _finalize_task(task)
-    del _tasks[task_id]
+    _tasks.pop(task_id, None)
     return f"Task {task_id} removed"
 
 
@@ -1446,9 +1582,10 @@ def ls(session: str = None, window: str = None) -> str:
     if result.returncode != 0:
         return "No tmux sessions found"
 
-    # Parse tmux data
-    pane_data = []  # [(session, widx, wname, auto_rename, pidx, tty, cwd)]
+    # Parse tmux data (1st pass: collect pane info and ttys)
+    raw_panes = []
     live_pane_ids = set()
+    all_ttys = []
     for line in result.stdout.strip().split('\n'):
         if not line:
             continue
@@ -1460,25 +1597,37 @@ def ls(session: str = None, window: str = None) -> str:
             continue
         if window and wname != window and widx != window:
             continue
-        # Get foreground process
-        proc = "-"
-        if tty:
-            try:
-                ps_result = subprocess.run(
-                    ["ps", "-t", tty, "-o", "stat=,args="],
-                    capture_output=True, text=True, timeout=2
-                )
-                for ps_line in ps_result.stdout.strip().split('\n'):
-                    ps_line = ps_line.strip()
-                    if ps_line and '+' in ps_line.split()[0]:
-                        proc = ps_line.split(None, 1)[1] if len(ps_line.split(None, 1)) > 1 else "-"
-                        break
-            except Exception:
-                pass
         pane_id = f"{sess}:{wname}.{pidx}"
         pane_id_idx = f"{sess}:{widx}.{pidx}"
         live_pane_ids.add(pane_id)
         live_pane_ids.add(pane_id_idx)
+        raw_panes.append((sess, widx, wname, auto_rename, pidx, tty, cwd))
+        if tty:
+            all_ttys.append(tty)
+
+    # Bulk ps call: get foreground processes for all ttys at once
+    fg_procs = {}
+    if all_ttys:
+        try:
+            tty_arg = ','.join(t.replace('/dev/', '') for t in all_ttys)
+            ps_result = subprocess.run(
+                ["ps", "-t", tty_arg, "-o", "tty=,stat=,args="],
+                capture_output=True, text=True, timeout=2
+            )
+            for ps_line in ps_result.stdout.strip().split('\n'):
+                ps_line = ps_line.strip()
+                if not ps_line:
+                    continue
+                ps_parts = ps_line.split(None, 2)
+                if len(ps_parts) >= 3 and '+' in ps_parts[1]:
+                    fg_procs['/dev/' + ps_parts[0]] = ps_parts[2]
+        except Exception:
+            pass
+
+    # Build pane_data with process info
+    pane_data = []
+    for sess, widx, wname, auto_rename, pidx, tty, cwd in raw_panes:
+        proc = fg_procs.get(tty, "-") if tty else "-"
         pane_data.append((sess, widx, wname, auto_rename, pidx, proc, cwd))
 
     # Auto-clean orphaned registrations (only when no filter applied)
@@ -1518,15 +1667,14 @@ def ls(session: str = None, window: str = None) -> str:
         reg_info = _working_panes.get(pane_id_name) or _working_panes.get(pane_id_idx)
         reg_str = f'  [R: "{reg_info["description"]}"]' if reg_info else ""
 
-        # Check active task
+        # Check active task (_find_active_task_on_pane already checks completion)
         task_str = ""
         for pane_key in [pane_id_name, pane_id_idx]:
             active = _find_active_task_on_pane(pane_key)
             if active:
                 tid, t = active
-                _, completed = check_task_output(t["pane"], t["begin"], t["end"])
+                completed = "end_time" in t
                 if completed:
-                    _finalize_task(t)
                     elapsed = t["end_time"] - t["start_time"]
                 else:
                     elapsed = time.time() - t["start_time"]
@@ -1608,6 +1756,7 @@ def kill_session(name: str, force: bool = False) -> str:
 
     _cleanup_session_resources(name)
     subprocess.run(["tmux", "kill-session", "-t", f"={name}"], capture_output=True)
+    _session_cache.pop(name, None)
 
     return f"Killed session '{name}'"
 
@@ -1709,9 +1858,14 @@ async def peek_output(pane: str, begin: str, wait: float) -> str:
     """Wait and capture output after begin marker."""
     await asyncio.sleep(wait)
 
-    raw = run_tmux_cmd(["capture-pane", "-t", pane, "-p", "-S", "-"])
-    lines = raw.split('\n')
+    for n_lines in [1000, 4000, 16000]:
+        raw = run_tmux_cmd(["capture-pane", "-t", pane, "-p", "-S", f"-{n_lines}"])
+        if begin in raw:
+            break
+    else:
+        raw = run_tmux_cmd(["capture-pane", "-t", pane, "-p", "-S", "-"])
 
+    lines = raw.split('\n')
     capturing = False
     result = []
     for line in lines:
@@ -1783,7 +1937,7 @@ async def _peek_multi(target_panes: list[str], code: str, wait: float, peek_fn) 
     if coros:
         results_list = await asyncio.gather(*coros.values(), return_exceptions=True)
         for p, result in zip(coros.keys(), results_list):
-            results[p] = str(result) if isinstance(result, Exception) else result
+            results[p] = str(result) if isinstance(result, BaseException) else result
     return _format_multi_result(results)
 
 
@@ -1937,16 +2091,36 @@ def send_keys(pane: str = None, keys: str = "", enter: bool = False, panes: list
 
 def _capture_single_pane(p: str, tail: int, rel_range: str, since_marker: str, filter_kwargs: dict) -> str:
     """Capture and filter a single pane."""
-    raw = run_tmux_cmd(["capture-pane", "-t", p, "-p", "-S", "-"])
-    all_lines = raw.rstrip().split('\n')
-
     if since_marker:
-        marker_idx = None
-        for idx, line in enumerate(all_lines):
-            if since_marker in line:
-                marker_idx = idx
-        if marker_idx is not None:
-            all_lines = all_lines[marker_idx + 1:]
+        # Marker could be far back — use progressive capture
+        all_lines = None
+        for n_lines in [1000, 4000, 16000]:
+            raw = run_tmux_cmd(["capture-pane", "-t", p, "-p", "-S", f"-{n_lines}"])
+            lines = raw.rstrip().split('\n')
+            marker_idx = None
+            for idx, line in enumerate(lines):
+                if since_marker in line:
+                    marker_idx = idx
+            if marker_idx is not None:
+                all_lines = lines[marker_idx + 1:]
+                break
+        if all_lines is None:
+            # fallback: full scrollback
+            raw = run_tmux_cmd(["capture-pane", "-t", p, "-p", "-S", "-"])
+            lines = raw.rstrip().split('\n')
+            marker_idx = None
+            for idx, line in enumerate(lines):
+                if since_marker in line:
+                    marker_idx = idx
+            all_lines = lines[marker_idx + 1:] if marker_idx is not None else lines
+    else:
+        # No marker — tail-based capture is sufficient
+        n_capture = max(tail, 100) if tail > 0 else 100
+        if rel_range:
+            start_off, end_off = parse_rel_range(rel_range)
+            n_capture = max(abs(start_off) + 50, n_capture)
+        raw = run_tmux_cmd(["capture-pane", "-t", p, "-p", "-S", f"-{n_capture}"])
+        all_lines = raw.rstrip().split('\n')
 
     if rel_range:
         start, end = parse_rel_range(rel_range)
@@ -2034,8 +2208,10 @@ def task_cancel_all() -> str:
 
     count = len(_tasks)
     for task_id in list(_tasks.keys()):
-        _finalize_task(_tasks[task_id])
-        del _tasks[task_id]
+        task = _tasks.get(task_id)
+        if task:
+            _finalize_task(task)
+            _tasks.pop(task_id, None)
 
     return f"Cancelled {count} task(s)"
 
