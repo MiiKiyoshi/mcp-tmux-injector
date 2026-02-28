@@ -16,7 +16,10 @@ This describes how you use tmux-injector tools. This is how the system works.
 │       then task_status / task_output / task_wait
 │
 ├─ Respond to prompt (password, yes/no)
-│   └─→ send_text
+│   └─→ send_text (plain text, sends Enter by default)
+│
+├─ Send special keys (C-c, Escape, arrows)
+│   └─→ send_keys (no Enter by default)
 │
 └─ Check current screen
     └─→ capture_pane
@@ -30,20 +33,9 @@ Starting an interpreter and running code:
     xpy(pane, "print('hello')")            # run code (blocking)
     xpy_peek(pane, "exit()", wait=1)       # exit interpreter
 
-Starting a long-running script (with monitoring):
-    xsh_peek(pane, "python3", wait=1)      # start interpreter
-    xpy_start(pane, file="train.py")       # returns task_id
-    task_status(task_id)                   # quick status check
-    task_output(task_id, tail=10)          # last 10 lines
-    task_wait(task_id, timeout=300)        # block until complete
-
-Waiting for multiple tasks:
-    tid1 = xsh_start(pane1, "make build")
-    tid2 = xsh_start(pane2, "make test")
-    task_wait(task_ids=[tid1, tid2], timeout=300)
-
-Race mode (return on first completion):
-    task_wait(task_ids=[tid1, tid2, tid3], race=True, timeout=600)
+Starting a long-running script:
+    xsh_peek(pane, "python3", wait=1)      # start interpreter first
+    xpy_start(pane, file="train.py")       # returns task_id for monitoring
 
 Without monitoring (no task_id):
     xsh_peek(pane, "python3 train.py", wait=2)
@@ -94,22 +86,7 @@ Semicolons work only for simple statements.
     """)
 
 ==========
-5. FILE SAVE WORKFLOW
-==========
-
-task_output supports saving to file. Verify output before saving:
-
-    task_id = xtcl_start(pane, "report_timing")
-    task_wait(task_id)
-    task_output(task_id)                                    # verify
-    task_output(task_id, save="/tmp/report.md", append=True,
-                include_command=True, markdown=True,
-                prefix="## Timing\n\n", suffix="\n\n")
-
-markdown=True auto-wraps in code fences with lang from task type.
-
-==========
-6. STATE TRACKING
+5. STATE TRACKING
 ==========
 
 Pane state is tracked in memory. capture_pane is not called before every command.
@@ -127,7 +104,7 @@ capture_pane is used when:
 - After abort/timeout from blocking tools (use task_list to find converted task)
 
 ==========
-7. ABORT/TIMEOUT BEHAVIOR
+6. ABORT/TIMEOUT BEHAVIOR
 ==========
 
 Abort/timeout means "end marker not received", not "command not sent".
@@ -140,7 +117,7 @@ Exit commands produce no end marker. Use peek for exit:
     xtcl_peek(pane, "exit", wait=1)
 
 ==========
-8. CONVERSATION CONTINUITY
+7. CONVERSATION CONTINUITY
 ==========
 
 Registered panes persist in MCP server memory across conversation compaction.
@@ -148,48 +125,11 @@ After compaction: ls() to check what is registered.
 New session or server restart: ask user which pane to use.
 
 ==========
-9. OWNERSHIP MODEL
+8. OWNERSHIP MODEL
 ==========
-
-Sessions, windows, and panes have an owner: "managed" (created by MCP) or "external" (pre-existing).
 
 set_pane() auto-registers the session/window as "external".
 create_session()/create_window() registers as "managed".
 
-Destructive actions on external resources require force=True.
-Destructive actions on managed resources proceed immediately.
-
 tmux kill-session, tmux kill-window via Bash: NEVER used.
 All session/window lifecycle is through MCP tools only.
-
-==========
-10. SESSION/WINDOW MANAGEMENT
-==========
-
-Creating sessions and windows:
-    create_session("bench", windows=["nvdla", "ariane"], start_dir="/data/project")
-    create_window("bench", "hidden1", start_dir="/data/project")
-    # All panes auto-registered as managed
-
-Killing managed resources (immediate):
-    kill_session("bench")           # managed → killed
-    kill_window("bench", "nvdla")   # managed → killed
-
-Killing external resources (requires force):
-    kill_session("bench")           # external → error with session info
-    kill_session("bench", force=True)  # external + force → killed (user confirms via Claude Code)
-
-Duplicate session check:
-    create_session("bench")  # already exists → error with session info
-
-==========
-11. PANE-BASED TASK LOOKUP
-==========
-
-task_status, task_output, task_wait accept pane/panes as alternative to task_id/task_ids.
-Pane is resolved to the active (running) task on that pane.
-
-    task_status(pane="bench:nvdla.0")              # status of active task on pane
-    task_output(pane="bench:nvdla.0", tail=10)     # output of active task on pane
-    task_wait(pane="bench:nvdla.0", timeout=300)   # wait for active task on pane
-    task_wait(panes=["bench:nvdla.0", "bench:ariane.0"])  # wait for multiple panes
