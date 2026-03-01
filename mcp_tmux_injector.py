@@ -668,13 +668,12 @@ def _find_active_task_on_pane(pane: str) -> tuple[str, dict] | None:
             if "end_time" in task:
                 completed = True
             else:
-                # Lightweight check: only scan tail for end marker
-                completed = _check_end_marker(task["pane"], task["end"])
-                if completed:
-                    # Full extraction and finalize
-                    output, _ = check_task_output(task["pane"], task["begin"], task["end"])
-                    task["cached_output"] = output
-                    _finalize_task(task)
+                completed = False
+                if _check_end_marker(task["pane"], task["end"]):
+                    output, completed = check_task_output(task["pane"], task["begin"], task["end"])
+                    if completed:
+                        task["cached_output"] = output
+                        _finalize_task(task)
             if not completed:
                 return task_id, task
             if task["start_time"] > latest_time:
@@ -1101,7 +1100,7 @@ def _finalize_task(task: dict) -> None:
 def _check_end_marker(pane: str, end: str, tail: int = 200) -> bool:
     """Lightweight completion check: only look for end marker in tail of scrollback."""
     raw = run_tmux_cmd(["capture-pane", "-t", pane, "-p", "-S", f"-{tail}"])
-    return end in raw
+    return any(line == end for line in raw.split('\n'))
 
 
 def _watch_task_completion(task_id: str) -> None:
@@ -1576,10 +1575,11 @@ def task_list(all: bool = False) -> str:
         if "end_time" in task:
             completed = True
         else:
-            completed = _check_end_marker(task["pane"], task["end"])
-            if completed:
-                output, _ = check_task_output(task["pane"], task["begin"], task["end"])
-                task["cached_output"] = output
+            completed = False
+            if _check_end_marker(task["pane"], task["end"]):
+                output, completed = check_task_output(task["pane"], task["begin"], task["end"])
+                if completed:
+                    task["cached_output"] = output
         if completed:
             _finalize_task(task)
             elapsed = task["end_time"] - task["start_time"]
