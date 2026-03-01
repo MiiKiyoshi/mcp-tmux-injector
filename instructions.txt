@@ -23,6 +23,7 @@ This describes how you use tmux-injector tools. This is how the system works.
 │
 ├─ Reset pane (kill process, fresh shell)
 │   └─→ respawn_pane (cleans tasks/locks, keeps registration)
+│       cmd= to start specific process after reset
 │
 └─ Check current screen
     └─→ capture_pane
@@ -56,6 +57,18 @@ Passing variables from REPL to script (globals trick):
     xpy_start(pane, file="train.py")       # script accesses via globals().get('model_path', None)
     # file= uses exec() which shares REPL's globals()
 
+Checking session/pane status:
+    ls()                              # compact: session names + window counts
+    ls(session="exp")                 # detailed: PID, process, cwd per pane
+    ls(session="exp", gpu=True)       # adds GPU device + memory
+
+Setting up parallel workspaces:
+    create_session("exp", windows=["a", "b", "c"], cmd="python3")
+    # 3 windows, each running python3, all panes auto-registered
+
+    create_session("exp", windows=["a", "b"], cmds=["python3", "bash"])
+    # per-window commands: window a→python3, window b→bash
+
 ==========
 3. PANE REGISTRATION (REQUIRED)
 ==========
@@ -68,7 +81,29 @@ Panes must be registered before use.
 "Pane not registered" error → ls() first, then re-register if needed.
 
 ==========
-4. CODE LIMITATIONS
+4. MULTI-PANE OPERATIONS
+==========
+
+All x* tools accept panes= for parallel dispatch.
+code= sends the same code to all panes. codes= sends different code per pane (1:1 indexed).
+
+Same code to all:
+    xpy(panes=["t1:a.0", "t1:b.0"], code="print('hello')")
+
+Different code per pane:
+    xpy(panes=["t1:a.0", "t1:b.0"], codes=["x=1; print(x)", "x=2; print(x)"])
+
+Works with all 9 tools: xpy/xtcl/xsh, xpy_start/xtcl_start/xsh_start, xpy_peek/xtcl_peek/xsh_peek.
+
+respawn_pane also supports panes= + cmd/cmds:
+    respawn_pane(panes=["t1:a.0", "t1:b.0"], cmd="python3")
+    respawn_pane(panes=["t1:a.0", "t1:b.0"], cmds=["python3", "bash"])
+
+code and codes are mutually exclusive. cmd and cmds are mutually exclusive.
+codes/cmds length must match target count.
+
+==========
+5. CODE LIMITATIONS
 ==========
 
 Literal \n in code breaks tmux injection (\n becomes Enter key).
@@ -89,7 +124,7 @@ Semicolons work only for simple statements.
     """)
 
 ==========
-5. STATE TRACKING
+6. STATE TRACKING
 ==========
 
 Pane state is tracked in memory. capture_pane is not called before every command.
@@ -108,7 +143,7 @@ capture_pane is used when:
 - After abort/timeout from blocking tools (use task_list to find converted task)
 
 ==========
-6. ABORT/TIMEOUT BEHAVIOR
+7. ABORT/TIMEOUT BEHAVIOR
 ==========
 
 Abort/timeout means "end marker not received", not "command not sent".
@@ -121,15 +156,22 @@ Exit commands produce no end marker. Use peek for exit:
     xtcl_peek(pane, "exit", wait=1)
 
 ==========
-7. CONVERSATION CONTINUITY
+8. CONVERSATION CONTINUITY
 ==========
 
 Registered panes persist in MCP server memory across conversation compaction.
 After compaction: ls() to check what is registered.
 New session or server restart: ask user which pane to use.
 
+Task tracking lost on MCP server restart:
+    xpy_start/xsh_start/xtcl_start task_ids are gone, but processes are still running.
+    task_wait/task_output will report "No task found".
+    Recovery: re-issue xpy_start/xsh_start/xtcl_start with a marker command.
+    tmux send-keys writes to the pane's pty buffer. If the process is busy,
+    the marker queues in stdin and executes when the current job finishes.
+
 ==========
-8. OWNERSHIP MODEL
+9. OWNERSHIP MODEL
 ==========
 
 set_pane() auto-registers the session/window as "external".
