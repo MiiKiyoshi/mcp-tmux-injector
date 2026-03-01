@@ -417,6 +417,17 @@ def _resolve_panes(pane: str | None, panes: list[str] | None) -> list[str] | Non
     return None
 
 
+def _validate_multi(single, multi, targets_name: str, targets: list) -> None:
+    """Validate single/multi mutual exclusivity and length match."""
+    if single and multi:
+        raise ValueError(f"Use '{targets_name[:-1]}' or '{targets_name}', not both")
+    if multi is not None:
+        if not targets:
+            raise ValueError(f"'{targets_name}' requires 'panes' or 'windows'")
+        if len(multi) != len(targets):
+            raise ValueError(f"len('{targets_name}')={len(multi)} != len(targets)={len(targets)}")
+
+
 def _format_multi_result(results: dict[str, str]) -> str:
     """Format multi-pane results, grouping panes with identical output."""
     groups: dict[str, list[str]] = {}
@@ -820,15 +831,16 @@ async def _blocking_on_pane(p: str, code: str, send_fn, timeout: float, filter_k
             lock.release()
 
 
-async def _blocking_multi(target_panes: list[str], code: str, send_fn, timeout: float, fkw: dict, task_type: str = "shell", tail: int = 0, head: int = None, force: bool = False) -> str:
+async def _blocking_multi(target_panes: list[str], code: str, send_fn, timeout: float, fkw: dict, task_type: str = "shell", tail: int = 0, head: int = None, force: bool = False, codes: list[str] = None) -> str:
     """Run blocking command on multiple panes with graceful skip for missing panes."""
     results = {}
     coros = {}
-    for p in target_panes:
+    for i, p in enumerate(target_panes):
         if not check_session(p):
             results[p] = "not found (skipped)"
         else:
-            coros[p] = _blocking_on_pane(p, code, send_fn, timeout, fkw, task_type=task_type, tail=tail, head=head, force=force)
+            c = codes[i] if codes else code
+            coros[p] = _blocking_on_pane(p, c, send_fn, timeout, fkw, task_type=task_type, tail=tail, head=head, force=force)
     if coros:
         results_list = await asyncio.gather(*coros.values(), return_exceptions=True)
         for p, result in zip(coros.keys(), results_list):
@@ -840,6 +852,7 @@ async def _blocking_multi(target_panes: list[str], code: str, send_fn, timeout: 
 async def xpy(
     pane: str = None,
     code: str = None,
+    codes: list[str] = None,
     file: str = None,
     timeout: float = 60.0,
     tail: int = 0,
@@ -864,7 +877,8 @@ async def xpy(
 
     Args:
         pane: Single tmux pane (e.g., t1:1.0)
-        code: Python code to execute
+        code: Python code to execute (same code for all panes)
+        codes: Different code per pane (1:1 with panes, mutually exclusive with code)
         file: Python file to execute (alternative to code)
         timeout: Timeout in seconds (default: 60)
         tail: If > 0, return only the last N lines (default: 0 = all)
@@ -885,24 +899,31 @@ async def xpy(
         panes: Multiple panes to execute simultaneously (use pane OR panes, not both)
     """
     target_panes = _resolve_panes(pane, panes)
+    _validate_multi(code, codes, "codes", target_panes)
 
     if file:
+        if codes:
+            raise ValueError("Use 'file' or 'codes', not both")
         client_cwd = await _get_client_cwd(ctx) if ctx else _client_cwd
         abs_path = _resolve_file_path(file, client_cwd)
         if not os.path.isfile(abs_path):
             raise FileNotFoundError(f"File not found: {abs_path}")
         code = f"exec(compile(open('{abs_path}').read(), '{abs_path}', 'exec'))"
 
-    if not code:
-        raise ValueError("Either 'code' or 'file' must be provided")
+    if not code and not codes:
+        raise ValueError("Either 'code', 'codes', or 'file' must be provided")
 
-    if "\\n" in code:
+    if code and "\\n" in code:
         raise ValueError("Code contains \\n which breaks tmux injection. Use print() for blank lines.")
+    if codes:
+        for c in codes:
+            if "\\n" in c:
+                raise ValueError("Code contains \\n which breaks tmux injection. Use print() for blank lines.")
 
     fkw = dict(grep=grep, v=v, i=i, w=w, F=F, m=m, A=A, B=B, C=C, n=n, uniq=uniq, strip_tqdm=strip_tqdm)
 
     if target_panes is not None:
-        return await _blocking_multi(target_panes, code, send_python_code, timeout, fkw, task_type="python", tail=tail, head=head, force=force)
+        return await _blocking_multi(target_panes, code, send_python_code, timeout, fkw, task_type="python", tail=tail, head=head, force=force, codes=codes)
 
     check_pane_registered(pane)
     if not check_session(pane):
@@ -914,6 +935,7 @@ async def xpy(
 async def xtcl(
     pane: str = None,
     code: str = "",
+    codes: list[str] = None,
     timeout: float = 60.0,
     tail: int = 0,
     head: int = None,
@@ -936,7 +958,8 @@ async def xtcl(
 
     Args:
         pane: Single tmux pane (e.g., t1:1.0)
-        code: TCL code to execute
+        code: TCL code to execute (same code for all panes)
+        codes: Different code per pane (1:1 with panes, mutually exclusive with code)
         timeout: Timeout in seconds (default: 60)
         tail: If > 0, return only the last N lines (default: 0 = all)
         head: If provided, return only the first N lines
@@ -956,14 +979,15 @@ async def xtcl(
         panes: Multiple panes to execute simultaneously (use pane OR panes, not both)
     """
     target_panes = _resolve_panes(pane, panes)
+    _validate_multi(code, codes, "codes", target_panes)
 
-    if not code:
-        raise ValueError("'code' must be provided")
+    if not code and not codes:
+        raise ValueError("'code' or 'codes' must be provided")
 
     fkw = dict(grep=grep, v=v, i=i, w=w, F=F, m=m, A=A, B=B, C=C, n=n, uniq=uniq, strip_tqdm=strip_tqdm)
 
     if target_panes is not None:
-        return await _blocking_multi(target_panes, code, send_tcl_code, timeout, fkw, task_type="tcl", tail=tail, head=head, force=force)
+        return await _blocking_multi(target_panes, code, send_tcl_code, timeout, fkw, task_type="tcl", tail=tail, head=head, force=force, codes=codes)
 
     check_pane_registered(pane)
     if not check_session(pane):
@@ -975,6 +999,7 @@ async def xtcl(
 async def xsh(
     pane: str = None,
     code: str = None,
+    codes: list[str] = None,
     file: str = None,
     timeout: float = 60.0,
     tail: int = 0,
@@ -1018,23 +1043,27 @@ async def xsh(
         uniq: Remove consecutive duplicate lines (like uniq, default: True)
         strip_tqdm: Remove tqdm progress lines, keeping only the last group
         panes: Multiple panes to execute simultaneously (use pane OR panes, not both)
+        codes: Per-pane shell commands (1:1 with panes). Use code OR codes, not both.
     """
     target_panes = _resolve_panes(pane, panes)
+    _validate_multi(code, codes, "codes", target_panes)
 
     if file:
+        if codes:
+            raise ValueError("Use 'file' or 'codes', not both")
         client_cwd = await _get_client_cwd(ctx) if ctx else _client_cwd
         abs_path = _resolve_file_path(file, client_cwd)
         if not os.path.isfile(abs_path):
             raise FileNotFoundError(f"File not found: {abs_path}")
         code = f"source '{abs_path}'"
 
-    if not code:
-        raise ValueError("Either 'code' or 'file' must be provided")
+    if not code and not codes:
+        raise ValueError("Either 'code', 'codes', or 'file' must be provided")
 
     fkw = dict(grep=grep, v=v, i=i, w=w, F=F, m=m, A=A, B=B, C=C, n=n, uniq=uniq, strip_tqdm=strip_tqdm)
 
     if target_panes is not None:
-        return await _blocking_multi(target_panes, code, send_shell_code, timeout, fkw, tail=tail, head=head, force=force)
+        return await _blocking_multi(target_panes, code, send_shell_code, timeout, fkw, tail=tail, head=head, force=force, codes=codes)
 
     check_pane_registered(pane)
     if not check_session(pane):
@@ -1133,6 +1162,7 @@ def _start_on_pane(p: str, code: str, task_type: str, send_fn) -> str:
 async def xpy_start(
     pane: str = None,
     code: str = None,
+    codes: list[str] = None,
     file: str = None,
     panes: list[str] = None,
     ctx: Context = None
@@ -1144,26 +1174,34 @@ async def xpy_start(
     Args:
         pane: Single tmux pane (e.g., t1:1.0)
         code: Python code to execute
+        codes: Per-pane Python code (1:1 with panes). Use code OR codes, not both.
         file: Python file to execute
         panes: Multiple panes to start simultaneously (use pane OR panes, not both)
     """
     target_panes = _resolve_panes(pane, panes)
+    _validate_multi(code, codes, "codes", target_panes)
 
     if file:
+        if codes:
+            raise ValueError("Use 'file' or 'codes', not both")
         client_cwd = await _get_client_cwd(ctx) if ctx else _client_cwd
         abs_path = _resolve_file_path(file, client_cwd)
         if not os.path.isfile(abs_path):
             raise FileNotFoundError(f"File not found: {abs_path}")
         code = f"exec(compile(open('{abs_path}').read(), '{abs_path}', 'exec'))"
 
-    if not code:
-        raise ValueError("Either 'code' or 'file' must be provided")
+    if not code and not codes:
+        raise ValueError("Either 'code', 'codes', or 'file' must be provided")
 
-    if "\\n" in code:
+    if code and "\\n" in code:
         raise ValueError("Code contains \\n which breaks tmux injection. Use print() for blank lines.")
+    if codes:
+        for c in codes:
+            if "\\n" in c:
+                raise ValueError("Code contains \\n which breaks tmux injection. Use print() for blank lines.")
 
     if target_panes is not None:
-        results = [_start_on_pane(p, code, "python", send_python_code) for p in target_panes]
+        results = [_start_on_pane(p, codes[i] if codes else code, "python", send_python_code) for i, p in enumerate(target_panes)]
         return '\n'.join(results)
 
     check_pane_registered(pane)
@@ -1179,21 +1217,23 @@ async def xpy_start(
 
 
 @mcp.tool()
-def xtcl_start(pane: str = None, code: str = "", panes: list[str] = None) -> str:
+def xtcl_start(pane: str = None, code: str = "", codes: list[str] = None, panes: list[str] = None) -> str:
     """Start TCL code execution (non-blocking). Returns task_id immediately.
 
     Args:
         pane: Single tmux pane (e.g., t1:1.0)
         code: TCL code to execute
+        codes: Per-pane TCL code (1:1 with panes). Use code OR codes, not both.
         panes: Multiple panes to start simultaneously (use pane OR panes, not both)
     """
     target_panes = _resolve_panes(pane, panes)
+    _validate_multi(code, codes, "codes", target_panes)
 
-    if not code:
-        raise ValueError("'code' must be provided")
+    if not code and not codes:
+        raise ValueError("Either 'code' or 'codes' must be provided")
 
     if target_panes is not None:
-        results = [_start_on_pane(p, code, "tcl", send_tcl_code) for p in target_panes]
+        results = [_start_on_pane(p, codes[i] if codes else code, "tcl", send_tcl_code) for i, p in enumerate(target_panes)]
         return '\n'.join(results)
 
     check_pane_registered(pane)
@@ -1212,6 +1252,7 @@ def xtcl_start(pane: str = None, code: str = "", panes: list[str] = None) -> str
 async def xsh_start(
     pane: str = None,
     code: str = None,
+    codes: list[str] = None,
     file: str = None,
     panes: list[str] = None,
     ctx: Context = None
@@ -1223,23 +1264,27 @@ async def xsh_start(
     Args:
         pane: Single tmux pane (e.g., t1:1.0)
         code: Shell command to execute
+        codes: Per-pane shell commands (1:1 with panes). Use code OR codes, not both.
         file: Shell script file to execute
         panes: Multiple panes to start simultaneously (use pane OR panes, not both)
     """
     target_panes = _resolve_panes(pane, panes)
+    _validate_multi(code, codes, "codes", target_panes)
 
     if file:
+        if codes:
+            raise ValueError("Use 'file' or 'codes', not both")
         client_cwd = await _get_client_cwd(ctx) if ctx else _client_cwd
         abs_path = _resolve_file_path(file, client_cwd)
         if not os.path.isfile(abs_path):
             raise FileNotFoundError(f"File not found: {abs_path}")
         code = f"source '{abs_path}'"
 
-    if not code:
-        raise ValueError("Either 'code' or 'file' must be provided")
+    if not code and not codes:
+        raise ValueError("Either 'code', 'codes', or 'file' must be provided")
 
     if target_panes is not None:
-        results = [_start_on_pane(p, code, "shell", send_shell_code) for p in target_panes]
+        results = [_start_on_pane(p, codes[i] if codes else code, "shell", send_shell_code) for i, p in enumerate(target_panes)]
         return '\n'.join(results)
 
     check_pane_registered(pane)
@@ -1574,21 +1619,25 @@ def task_cancel(task_id: str) -> str:
 # =============================================================================
 
 @mcp.tool()
-def ls(session: str = None, window: str = None) -> str:
+def ls(session: str = None, window: str = None, gpu: bool = False) -> str:
     """List tmux sessions/windows/panes as a tree.
 
-    Shows process, cwd, ownership, registration, and active tasks.
-    Auto-cleans orphaned pane registrations.
+    Without session: compact summary (session name, status, window count).
+    With session: detailed tree with PID, process, cwd.
+    With gpu=True: adds per-pane GPU device and memory from gpustat.
 
     Args:
-        session: Filter to specific session
+        session: Filter to specific session (enables detailed mode)
         window: Filter to specific window (requires session)
+        gpu: Show GPU memory per pane (requires session)
     """
     if window and not session:
         raise ValueError("'window' requires 'session'")
+    if gpu and not session:
+        raise ValueError("'gpu' requires 'session'")
 
     # Gather all pane info from tmux
-    fmt = "#{session_name}|#{window_index}|#{window_name}|#{automatic-rename}|#{pane_index}|#{pane_tty}|#{pane_current_path}"
+    fmt = "#{session_name}|#{window_index}|#{window_name}|#{automatic-rename}|#{pane_index}|#{pane_tty}|#{pane_current_path}|#{pane_pid}"
     result = subprocess.run(
         ["tmux", "list-panes", "-a", "-F", fmt],
         capture_output=True, text=True
@@ -1604,9 +1653,9 @@ def ls(session: str = None, window: str = None) -> str:
         if not line:
             continue
         parts = line.split('|')
-        if len(parts) < 7:
+        if len(parts) < 8:
             continue
-        sess, widx, wname, auto_rename, pidx, tty, cwd = parts[0], parts[1], parts[2], parts[3], parts[4], parts[5], parts[6]
+        sess, widx, wname, auto_rename, pidx, tty, cwd, ppid = parts[0], parts[1], parts[2], parts[3], parts[4], parts[5], parts[6], parts[7]
         if session and sess != session:
             continue
         if window and wname != window and widx != window:
@@ -1615,7 +1664,7 @@ def ls(session: str = None, window: str = None) -> str:
         pane_id_idx = f"{sess}:{widx}.{pidx}"
         live_pane_ids.add(pane_id)
         live_pane_ids.add(pane_id_idx)
-        raw_panes.append((sess, widx, wname, auto_rename, pidx, tty, cwd))
+        raw_panes.append((sess, widx, wname, auto_rename, pidx, tty, cwd, ppid))
         if tty:
             all_ttys.append(tty)
 
@@ -1640,9 +1689,9 @@ def ls(session: str = None, window: str = None) -> str:
 
     # Build pane_data with process info
     pane_data = []
-    for sess, widx, wname, auto_rename, pidx, tty, cwd in raw_panes:
+    for sess, widx, wname, auto_rename, pidx, tty, cwd, ppid in raw_panes:
         proc = fg_procs.get(tty, "-") if tty else "-"
-        pane_data.append((sess, widx, wname, auto_rename, pidx, proc, cwd))
+        pane_data.append((sess, widx, wname, auto_rename, pidx, proc, cwd, ppid))
 
     # Auto-clean orphaned registrations (only when no filter applied)
     if not session and not window:
@@ -1655,11 +1704,47 @@ def ls(session: str = None, window: str = None) -> str:
     for s in list_sessions():
         sessions_meta[s["name"]] = s
 
-    # Build tree output
+    # Compact mode: no session filter → session summary only
+    if not session:
+        sess_summary = {}
+        for sess, widx, wname, auto_rename, pidx, proc, cwd, ppid in pane_data:
+            if sess not in sess_summary:
+                meta = sessions_meta.get(sess, {})
+                status = "attached" if meta.get("attached") else "detached"
+                owner = _sessions.get(sess, {}).get("owner", "untracked")
+                sess_summary[sess] = {"status": status, "owner": owner, "windows": set()}
+            sess_summary[sess]["windows"].add(wname)
+        if not sess_summary:
+            return "No tmux sessions found"
+        output = []
+        for sess, info in sess_summary.items():
+            n_win = len(info["windows"])
+            output.append(f"{sess} ({info['status']}, {info['owner']}, {n_win}w)")
+        return '\n'.join(output)
+
+    # Detailed mode: session specified → full tree with PID
+    # GPU memory: only when gpu=True
+    _gpu_by_pid = {}
+    if gpu:
+        try:
+            _gs = subprocess.run(
+                ["gpustat", "-p", "--no-header"],
+                capture_output=True, text=True, timeout=3
+            )
+            for _gl in _gs.stdout.strip().split('\n'):
+                _gm = re.match(r'\[(\d+)\]', _gl)
+                if not _gm:
+                    continue
+                _gi = int(_gm.group(1))
+                for _pm in re.finditer(r'/(\d+)\((\d+)M\)', _gl):
+                    _gpu_by_pid[_pm.group(1)] = f"cuda:{_gi} {_pm.group(2)}M"
+        except Exception:
+            pass
+
     output = []
     prev_sess = None
     prev_widx = None
-    for sess, widx, wname, auto_rename, pidx, proc, cwd in pane_data:
+    for sess, widx, wname, auto_rename, pidx, proc, cwd, ppid in pane_data:
         if sess != prev_sess:
             meta = sessions_meta.get(sess, {})
             status = "attached" if meta.get("attached") else "detached"
@@ -1697,25 +1782,28 @@ def ls(session: str = None, window: str = None) -> str:
                 break
 
         # Shorten home dir
-        cwd = cwd.replace(os.path.expanduser("~"), "~")
-        output.append(f"    {pidx}: {proc}  \"{cwd}\"{reg_str}{task_str}")
+        home = os.path.expanduser("~")
+        cwd = cwd.replace(home, "~")
+        proc = proc.replace(home, "~")
+        gpu_str = f"  [{_gpu_by_pid[ppid]}]" if ppid in _gpu_by_pid else ""
+        output.append(f"    {pidx}: [{ppid}] {proc}  \"{cwd}\"{gpu_str}{reg_str}{task_str}")
 
     if not output:
-        if session:
-            return f"Session '{session}' not found"
-        return "No tmux sessions found"
+        return f"Session '{session}' not found"
 
     return '\n'.join(output)
 
 
 @mcp.tool()
-def create_session(name: str, windows: list[str] = None, start_dir: str = None) -> str:
+def create_session(name: str, windows: list[str] = None, start_dir: str = None, cmd: str = None, cmds: list[str] = None) -> str:
     """Create a new tmux session (managed). Auto-registers all panes.
 
     Args:
         name: Session name
         windows: Window names to create (default: one window named "main")
         start_dir: Starting directory for the session
+        cmd: Shell command to run in each window instead of default shell
+        cmds: Per-window commands (1:1 with windows). Use cmd OR cmds, not both.
     """
     if check_session(name):
         raise ValueError(
@@ -1726,16 +1814,24 @@ def create_session(name: str, windows: list[str] = None, start_dir: str = None) 
     if windows is None:
         windows = ["main"]
 
-    cmd = ["tmux", "new-session", "-d", "-s", name, "-n", windows[0]]
-    if start_dir:
-        cmd.extend(["-c", os.path.expanduser(start_dir)])
-    subprocess.run(cmd, capture_output=True)
+    _validate_multi(cmd, cmds, "cmds", windows)
 
-    for w_name in windows[1:]:
-        w_cmd = ["tmux", "new-window", "-t", name, "-n", w_name]
+    w_cmd = cmds[0] if cmds else cmd
+    args = ["tmux", "new-session", "-d", "-s", name, "-n", windows[0]]
+    if start_dir:
+        args.extend(["-c", os.path.expanduser(start_dir)])
+    if w_cmd:
+        args.append(w_cmd)
+    subprocess.run(args, capture_output=True)
+
+    for wi, w_name in enumerate(windows[1:], 1):
+        w_cmd = cmds[wi] if cmds else cmd
+        w_args = ["tmux", "new-window", "-t", name, "-n", w_name]
         if start_dir:
-            w_cmd.extend(["-c", os.path.expanduser(start_dir)])
-        subprocess.run(w_cmd, capture_output=True)
+            w_args.extend(["-c", os.path.expanduser(start_dir)])
+        if w_cmd:
+            w_args.append(w_cmd)
+        subprocess.run(w_args, capture_output=True)
 
     _sessions[name] = {
         "owner": MANAGED,
@@ -1776,13 +1872,14 @@ def kill_session(name: str, force: bool = False) -> str:
 
 
 @mcp.tool()
-def create_window(session: str, name: str, start_dir: str = None) -> str:
+def create_window(session: str, name: str, start_dir: str = None, cmd: str = None) -> str:
     """Create a new window in an existing session (managed). Auto-registers pane.
 
     Args:
         session: Session name
         name: Window name
         start_dir: Starting directory
+        cmd: Shell command to run instead of default shell
     """
     if not check_session(session):
         raise ValueError(f"Session '{session}' does not exist")
@@ -1791,10 +1888,12 @@ def create_window(session: str, name: str, start_dir: str = None) -> str:
     if name in existing:
         raise ValueError(f"Window '{name}' already exists in session '{session}'")
 
-    cmd = ["tmux", "new-window", "-t", session, "-n", name]
+    args = ["tmux", "new-window", "-t", session, "-n", name]
     if start_dir:
-        cmd.extend(["-c", os.path.expanduser(start_dir)])
-    subprocess.run(cmd, capture_output=True)
+        args.extend(["-c", os.path.expanduser(start_dir)])
+    if cmd:
+        args.append(cmd)
+    subprocess.run(args, capture_output=True)
 
     if session not in _sessions:
         _sessions[session] = {
@@ -1868,15 +1967,15 @@ def remove_pane(pane: str) -> str:
     return f"Removed: {pane}"
 
 
-def _respawn_single(pane: str, start_dir: str = None, command: str = None) -> str:
+def _respawn_single(pane: str, start_dir: str = None, cmd: str = None) -> str:
     """Respawn a single registered pane. Returns status string."""
     cleaned = _cleanup_pane_tasks(pane)
-    cmd = ["tmux", "respawn-pane", "-k", "-t", pane]
+    args = ["tmux", "respawn-pane", "-k", "-t", pane]
     if start_dir:
-        cmd.extend(["-c", os.path.expanduser(start_dir)])
-    if command:
-        cmd.append(command)
-    subprocess.run(cmd, capture_output=True)
+        args.extend(["-c", os.path.expanduser(start_dir)])
+    if cmd:
+        args.append(cmd)
+    subprocess.run(args, capture_output=True)
     desc = _working_panes[pane]["description"]
     parts = [f"Respawned: {pane} ({desc})"]
     if cleaned:
@@ -1885,7 +1984,7 @@ def _respawn_single(pane: str, start_dir: str = None, command: str = None) -> st
 
 
 @mcp.tool()
-def respawn_pane(pane: str = None, panes: list[str] = None, start_dir: str = None, command: str = None) -> str:
+def respawn_pane(pane: str = None, panes: list[str] = None, start_dir: str = None, cmd: str = None, cmds: list[str] = None) -> str:
     """Kill the running process in a pane and start a fresh shell.
     Cleans up associated tasks and locks. Registration (description/owner) is preserved.
 
@@ -1893,14 +1992,16 @@ def respawn_pane(pane: str = None, panes: list[str] = None, start_dir: str = Non
         pane: Single pane to respawn
         panes: Multiple panes to respawn in parallel
         start_dir: Working directory for the new shell
-        command: Shell command to run instead of default shell
+        cmd: Shell command to run instead of default shell
+        cmds: Per-pane commands (1:1 with panes). Use cmd OR cmds, not both.
     """
     multi = _resolve_panes(pane, panes)
+    _validate_multi(cmd, cmds, "cmds", multi)
     if multi is not None:
-        results = {p: _respawn_single(p, start_dir, command) for p in multi}
+        results = {p: _respawn_single(p, start_dir, cmds[i] if cmds else cmd) for i, p in enumerate(multi)}
         return _format_multi_result(results)
     check_pane_registered(pane)
-    return _respawn_single(pane, start_dir, command)
+    return _respawn_single(pane, start_dir, cmd)
 
 
 async def peek_output(pane: str, begin: str, wait: float) -> str:
@@ -1974,15 +2075,16 @@ async def _peek_on_pane_sh(p: str, code: str, wait: float) -> str:
         lock.release()
 
 
-async def _peek_multi(target_panes: list[str], code: str, wait: float, peek_fn) -> str:
+async def _peek_multi(target_panes: list[str], code: str, wait: float, peek_fn, codes: list[str] = None) -> str:
     """Run peek on multiple panes concurrently and return grouped result."""
     results = {}
     coros = {}
-    for p in target_panes:
+    for i, p in enumerate(target_panes):
         if not check_session(p):
             results[p] = "not found (skipped)"
         else:
-            coros[p] = peek_fn(p, code, wait)
+            c = codes[i] if codes else code
+            coros[p] = peek_fn(p, c, wait)
     if coros:
         results_list = await asyncio.gather(*coros.values(), return_exceptions=True)
         for p, result in zip(coros.keys(), results_list):
@@ -1994,6 +2096,7 @@ async def _peek_multi(target_panes: list[str], code: str, wait: float, peek_fn) 
 async def xpy_peek(
     pane: str = None,
     code: str = "",
+    codes: list[str] = None,
     wait: float = 1.0,
     panes: list[str] = None
 ) -> str:
@@ -2002,12 +2105,14 @@ async def xpy_peek(
     Args:
         pane: Single tmux pane (e.g., t1:1.0)
         code: Python code to execute
+        codes: Per-pane Python code (1:1 with panes). Use code OR codes, not both.
         wait: Seconds to wait before capturing (default: 1.0)
         panes: Multiple panes (use pane OR panes, not both)
     """
     target_panes = _resolve_panes(pane, panes)
+    _validate_multi(code, codes, "codes", target_panes)
     if target_panes is not None:
-        return await _peek_multi(target_panes, code, wait, _peek_on_pane_py)
+        return await _peek_multi(target_panes, code, wait, _peek_on_pane_py, codes=codes)
 
     check_pane_registered(pane)
     if not check_session(pane):
@@ -2019,6 +2124,7 @@ async def xpy_peek(
 async def xtcl_peek(
     pane: str = None,
     code: str = "",
+    codes: list[str] = None,
     wait: float = 1.0,
     panes: list[str] = None
 ) -> str:
@@ -2027,12 +2133,14 @@ async def xtcl_peek(
     Args:
         pane: Single tmux pane (e.g., t1:1.0)
         code: TCL code to execute
+        codes: Per-pane TCL code (1:1 with panes). Use code OR codes, not both.
         wait: Seconds to wait before capturing (default: 1.0)
         panes: Multiple panes (use pane OR panes, not both)
     """
     target_panes = _resolve_panes(pane, panes)
+    _validate_multi(code, codes, "codes", target_panes)
     if target_panes is not None:
-        return await _peek_multi(target_panes, code, wait, _peek_on_pane_tcl)
+        return await _peek_multi(target_panes, code, wait, _peek_on_pane_tcl, codes=codes)
 
     check_pane_registered(pane)
     if not check_session(pane):
@@ -2044,6 +2152,7 @@ async def xtcl_peek(
 async def xsh_peek(
     pane: str = None,
     code: str = "",
+    codes: list[str] = None,
     wait: float = 1.0,
     panes: list[str] = None
 ) -> str:
@@ -2052,12 +2161,14 @@ async def xsh_peek(
     Args:
         pane: Single tmux pane (e.g., t1:1.0)
         code: Shell command to execute
+        codes: Per-pane shell commands (1:1 with panes). Use code OR codes, not both.
         wait: Seconds to wait before capturing (default: 1.0)
         panes: Multiple panes (use pane OR panes, not both)
     """
     target_panes = _resolve_panes(pane, panes)
+    _validate_multi(code, codes, "codes", target_panes)
     if target_panes is not None:
-        return await _peek_multi(target_panes, code, wait, _peek_on_pane_sh)
+        return await _peek_multi(target_panes, code, wait, _peek_on_pane_sh, codes=codes)
 
     check_pane_registered(pane)
     if not check_session(pane):
