@@ -183,13 +183,16 @@ def _wrap_cmd(cmd: str) -> str:
     return f"bash -c {shlex.quote(cmd + '; exec bash')}"
 
 
-def run_tmux_cmd(args: list[str], capture: bool = True) -> str:
+def run_tmux_cmd(args: list[str], capture: bool = True, raise_on_error: bool = False) -> str:
     """Run a tmux command and return output."""
     result = subprocess.run(
         ["tmux"] + args,
         capture_output=capture,
         text=True
     )
+    if raise_on_error and result.returncode != 0:
+        reason = result.stderr.strip() if capture else ""
+        raise RuntimeError(reason or "tmux command failed")
     return result.stdout if capture else ""
 
 
@@ -1105,14 +1108,8 @@ def _finalize_task(task: dict) -> None:
 
 def _check_end_marker(pane: str, end: str, tail: int = 200) -> bool:
     """Lightweight completion check: only look for end marker in tail of scrollback."""
-    result = subprocess.run(
-        ["tmux", "capture-pane", "-t", pane, "-p", "-S", f"-{tail}"],
-        capture_output=True, text=True
-    )
-    if result.returncode != 0:
-        reason = result.stderr.strip() or "capture-pane failed"
-        raise RuntimeError(reason)
-    return any(line == end for line in result.stdout.split('\n'))
+    raw = run_tmux_cmd(["capture-pane", "-t", pane, "-p", "-S", f"-{tail}"], raise_on_error=True)
+    return any(line == end for line in raw.split('\n'))
 
 
 def _watch_task_completion(task_id: str) -> None:
@@ -1994,6 +1991,10 @@ def remove_pane(pane: str) -> str:
 
 def _respawn_single(pane: str, start_dir: str = None, cmd: str = None) -> str:
     """Respawn a single registered pane. Returns status string."""
+    try:
+        run_tmux_cmd(["list-panes", "-t", pane], raise_on_error=True)
+    except RuntimeError as e:
+        raise ValueError(f"Pane '{pane}' does not exist: {e}")
     cleaned = _cleanup_pane_tasks(pane)
     args = ["tmux", "respawn-pane", "-k", "-t", pane]
     if start_dir:

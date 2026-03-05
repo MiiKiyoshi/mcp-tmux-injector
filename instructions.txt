@@ -25,8 +25,11 @@ This describes how you use tmux-injector tools. This is how the system works.
 │   └─→ respawn_pane (cleans tasks/locks, keeps registration)
 │       cmd= to start specific process after reset
 │
-└─ Check current screen
-    └─→ capture_pane
+├─ Check current screen
+│   └─→ capture_pane
+│
+└─ Check sessions, processes, GPU memory
+    └─→ ls (compact overview), ls(session=, gpu=True) (detailed + GPU)
 
 ==========
 2. COMMON PATTERNS
@@ -40,6 +43,17 @@ Starting an interpreter and running code:
 Starting a long-running script:
     xsh_peek(pane, "python3", wait=1)      # start interpreter first
     xpy_start(pane, file="train.py")       # returns task_id for monitoring
+
+Waiting for long-running tasks:
+    task_id = xpy_start(pane, file="train.py")
+    task_wait(task_id=task_id, timeout=300)
+
+    # Multiple parallel tasks:
+    task_wait(task_ids=[id1, id2], race=True, timeout=300)
+    # race=True: returns when first task completes
+
+    # capture_pane polling loop is an anti-pattern when task_id exists.
+    # task_wait with timeout replaces repeated capture_pane calls.
 
 Without monitoring (no task_id):
     xsh_peek(pane, "python3 train.py", wait=2)
@@ -142,6 +156,9 @@ capture_pane is used when:
 - After Ctrl+C interrupt (state uncertain)
 - After abort/timeout from blocking tools (use task_list to find converted task)
 
+capture_pane is NOT for polling task progress.
+When task_id exists (from xpy_start/xsh_start/xtcl_start), use task_wait.
+
 ==========
 7. ABORT/TIMEOUT BEHAVIOR
 ==========
@@ -154,6 +171,11 @@ After abort/timeout: task_list() to find the converted task, then task_wait/task
 
 Exit commands produce no end marker. Use peek for exit:
     xtcl_peek(pane, "exit", wait=1)
+
+task_wait returning [error]:
+    Pane died during task execution (crash, kill, etc.).
+    task_output(task_id) shows the exact tmux error reason.
+    Recovery: ls() to check pane state → if alive, reuse directly.
 
 ==========
 8. CONVERSATION CONTINUITY
