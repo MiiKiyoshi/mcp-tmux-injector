@@ -177,6 +177,9 @@ task_wait returning [error]:
     task_output(task_id) shows the exact tmux error reason.
     Recovery: ls() to check pane state → if alive, reuse directly.
 
+task_cancel removes tracking only — execution in tmux continues.
+To actually stop: send_keys(pane, "C-c") first, then task_cancel.
+
 ==========
 8. CONVERSATION CONTINUITY
 ==========
