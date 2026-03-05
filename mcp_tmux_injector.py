@@ -678,11 +678,17 @@ def _find_active_task_on_pane(pane: str) -> tuple[str, dict] | None:
                 completed = True
             else:
                 completed = False
-                if _check_end_marker(task["pane"], task["end"]):
-                    output, completed = check_task_output(task["pane"], task["begin"], task["end"])
-                    if completed:
-                        task["cached_output"] = output
-                        _finalize_task(task)
+                try:
+                    if _check_end_marker(task["pane"], task["end"]):
+                        output, completed = check_task_output(task["pane"], task["begin"], task["end"])
+                        if completed:
+                            task["cached_output"] = output
+                            _finalize_task(task)
+                except RuntimeError as e:
+                    task["error"] = str(e)
+                    task["cached_output"] = f"[error] {e}"
+                    _finalize_task(task)
+                    completed = True
             if not completed:
                 return task_id, task
             if task["start_time"] > latest_time:
@@ -1598,10 +1604,16 @@ def task_list(all: bool = False) -> str:
             completed = True
         else:
             completed = False
-            if _check_end_marker(task["pane"], task["end"]):
-                output, completed = check_task_output(task["pane"], task["begin"], task["end"])
-                if completed:
-                    task["cached_output"] = output
+            try:
+                if _check_end_marker(task["pane"], task["end"]):
+                    output, completed = check_task_output(task["pane"], task["begin"], task["end"])
+                    if completed:
+                        task["cached_output"] = output
+            except RuntimeError as e:
+                task["error"] = str(e)
+                task["cached_output"] = f"[error] {e}"
+                _finalize_task(task)
+                completed = True
         if completed:
             _finalize_task(task)
             elapsed = task["end_time"] - task["start_time"]
