@@ -39,6 +39,7 @@ import time
 import random
 import os
 import re
+import shlex
 import threading
 import asyncio
 from mcp.server.fastmcp import FastMCP, Context
@@ -175,6 +176,11 @@ def acquire_pane_lock(pane: str) -> threading.Lock:
                     return lock
 
     raise RuntimeError(f"Pane '{pane}' is busy with another task")
+
+
+def _wrap_cmd(cmd: str) -> str:
+    """Wrap cmd in bash so pane survives process exit/crash."""
+    return f"bash -c {shlex.quote(cmd + '; exec bash')}"
 
 
 def run_tmux_cmd(args: list[str], capture: bool = True) -> str:
@@ -1099,8 +1105,14 @@ def _finalize_task(task: dict) -> None:
 
 def _check_end_marker(pane: str, end: str, tail: int = 200) -> bool:
     """Lightweight completion check: only look for end marker in tail of scrollback."""
-    raw = run_tmux_cmd(["capture-pane", "-t", pane, "-p", "-S", f"-{tail}"])
-    return any(line == end for line in raw.split('\n'))
+    result = subprocess.run(
+        ["tmux", "capture-pane", "-t", pane, "-p", "-S", f"-{tail}"],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        reason = result.stderr.strip() or "capture-pane failed"
+        raise RuntimeError(reason)
+    return any(line == end for line in result.stdout.split('\n'))
 
 
 def _watch_task_completion(task_id: str) -> None:
@@ -1115,6 +1127,11 @@ def _watch_task_completion(task_id: str) -> None:
             return
         try:
             found = _check_end_marker(task["pane"], task["end"])
+        except RuntimeError as e:
+            task["error"] = str(e)
+            task["cached_output"] = f"[error] {e}"
+            _finalize_task(task)
+            return
         except Exception:
             time.sleep(interval)
             interval = min(interval * 2, max_interval)
@@ -1485,7 +1502,15 @@ async def _wait_single_task(task_id: str, timeout: float) -> str:
             elapsed = task["end_time"] - task["start_time"]
             return f"[completed] {elapsed:.1f}s"
         await asyncio.sleep(interval)
-        if _check_end_marker(task["pane"], task["end"]):
+        try:
+            found = _check_end_marker(task["pane"], task["end"])
+        except RuntimeError as e:
+            task["error"] = str(e)
+            task["cached_output"] = f"[error] {e}"
+            _finalize_task(task)
+            elapsed = task["end_time"] - task["start_time"]
+            return f"[error] {e} ({elapsed:.1f}s)"
+        if found:
             output, completed = check_task_output(task["pane"], task["begin"], task["end"])
             if completed:
                 task["cached_output"] = output
@@ -1587,7 +1612,7 @@ def task_list(all: bool = False) -> str:
             elapsed = time.time() - task["start_time"]
         if completed and not all:
             continue
-        status = "completed" if completed else "running"
+        status = "error" if "error" in task else ("completed" if completed else "running")
         cmd = task.get("command", "")
         cmd_display = (cmd[:37] + "...") if len(cmd) > 40 else cmd
         cmd_display = cmd_display.replace('\n', ' ')
@@ -1821,7 +1846,7 @@ def create_session(name: str, windows: list[str] = None, start_dir: str = None, 
     if start_dir:
         args.extend(["-c", os.path.expanduser(start_dir)])
     if w_cmd:
-        args.append(w_cmd)
+        args.append(_wrap_cmd(w_cmd))
     subprocess.run(args, capture_output=True)
 
     for wi, w_name in enumerate(windows[1:], 1):
@@ -1830,7 +1855,7 @@ def create_session(name: str, windows: list[str] = None, start_dir: str = None, 
         if start_dir:
             w_args.extend(["-c", os.path.expanduser(start_dir)])
         if w_cmd:
-            w_args.append(w_cmd)
+            w_args.append(_wrap_cmd(w_cmd))
         subprocess.run(w_args, capture_output=True)
 
     _sessions[name] = {
@@ -1892,7 +1917,7 @@ def create_window(session: str, name: str, start_dir: str = None, cmd: str = Non
     if start_dir:
         args.extend(["-c", os.path.expanduser(start_dir)])
     if cmd:
-        args.append(cmd)
+        args.append(_wrap_cmd(cmd))
     subprocess.run(args, capture_output=True)
 
     if session not in _sessions:
@@ -1974,7 +1999,7 @@ def _respawn_single(pane: str, start_dir: str = None, cmd: str = None) -> str:
     if start_dir:
         args.extend(["-c", os.path.expanduser(start_dir)])
     if cmd:
-        args.append(cmd)
+        args.append(_wrap_cmd(cmd))
     subprocess.run(args, capture_output=True)
     desc = _working_panes[pane]["description"]
     parts = [f"Respawned: {pane} ({desc})"]
