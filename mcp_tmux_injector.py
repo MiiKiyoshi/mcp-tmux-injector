@@ -1708,24 +1708,26 @@ def ls(session: str = None, window: str = None, gpu: bool = False) -> str:
         try:
             tty_arg = ','.join(t.replace('/dev/', '') for t in all_ttys)
             ps_result = subprocess.run(
-                ["ps", "-t", tty_arg, "-o", "tty=,stat=,args="],
+                ["ps", "-t", tty_arg, "-o", "pid=,tty=,stat=,args="],
                 capture_output=True, text=True, timeout=2
             )
             for ps_line in ps_result.stdout.strip().split('\n'):
                 ps_line = ps_line.strip()
                 if not ps_line:
                     continue
-                ps_parts = ps_line.split(None, 2)
-                if len(ps_parts) >= 3 and '+' in ps_parts[1]:
-                    fg_procs['/dev/' + ps_parts[0]] = ps_parts[2]
+                ps_parts = ps_line.split(None, 3)
+                if len(ps_parts) >= 4 and '+' in ps_parts[2]:
+                    fg_procs['/dev/' + ps_parts[1]] = (ps_parts[3], ps_parts[0])
         except Exception:
             pass
 
     # Build pane_data with process info
     pane_data = []
     for sess, widx, wname, auto_rename, pidx, tty, cwd, ppid in raw_panes:
-        proc = fg_procs.get(tty, "-") if tty else "-"
-        pane_data.append((sess, widx, wname, auto_rename, pidx, proc, cwd, ppid))
+        fg = fg_procs.get(tty) if tty else None
+        proc = fg[0] if fg else "-"
+        fg_pid = fg[1] if fg else ppid  # foreground process PID for GPU lookup
+        pane_data.append((sess, widx, wname, auto_rename, pidx, proc, cwd, ppid, fg_pid))
 
     # Auto-clean orphaned registrations (only when no filter applied)
     if not session and not window:
@@ -1741,7 +1743,7 @@ def ls(session: str = None, window: str = None, gpu: bool = False) -> str:
     # Compact mode: no session filter → session summary only
     if not session:
         sess_summary = {}
-        for sess, widx, wname, auto_rename, pidx, proc, cwd, ppid in pane_data:
+        for sess, widx, wname, auto_rename, pidx, proc, cwd, ppid, fg_pid in pane_data:
             if sess not in sess_summary:
                 meta = sessions_meta.get(sess, {})
                 status = "attached" if meta.get("attached") else "detached"
@@ -1778,7 +1780,7 @@ def ls(session: str = None, window: str = None, gpu: bool = False) -> str:
     output = []
     prev_sess = None
     prev_widx = None
-    for sess, widx, wname, auto_rename, pidx, proc, cwd, ppid in pane_data:
+    for sess, widx, wname, auto_rename, pidx, proc, cwd, ppid, fg_pid in pane_data:
         if sess != prev_sess:
             meta = sessions_meta.get(sess, {})
             status = "attached" if meta.get("attached") else "detached"
@@ -1819,7 +1821,7 @@ def ls(session: str = None, window: str = None, gpu: bool = False) -> str:
         home = os.path.expanduser("~")
         cwd = cwd.replace(home, "~")
         proc = proc.replace(home, "~")
-        gpu_str = f"  [{_gpu_by_pid[ppid]}]" if ppid in _gpu_by_pid else ""
+        gpu_str = f"  [{_gpu_by_pid[fg_pid]}]" if fg_pid in _gpu_by_pid else ""
         output.append(f"    {pidx}: [{ppid}] {proc}  \"{cwd}\"{gpu_str}{reg_str}{task_str}")
 
     if not output:
