@@ -313,7 +313,7 @@ def parse_rel_range(rel_range: str) -> tuple[int, int]:
 
     start_str, end_str = parts
     start = -abs(int(start_str)) if start_str.strip() else None
-    end = -abs(int(end_str)) if end_str.strip() else None
+    end = -abs(int(end_str)) if end_str.strip() and int(end_str) != 0 else None
     return start, end
 
 
@@ -2010,11 +2010,11 @@ def _respawn_single(pane: str, start_dir: str = None, cmd: str = None) -> str:
     except RuntimeError as e:
         raise ValueError(f"Pane '{pane}' does not exist: {e}")
     cleaned = _cleanup_pane_tasks(pane)
+    cmd = cmd or "bash"
     args = ["tmux", "respawn-pane", "-k", "-t", pane]
     if start_dir:
         args.extend(["-c", os.path.expanduser(start_dir)])
-    if cmd:
-        args.append(_wrap_cmd(cmd))
+    args.append(_wrap_cmd(cmd))
     subprocess.run(args, capture_output=True)
     desc = _working_panes[pane]["description"]
     parts = [f"Respawned: {pane} ({desc})"]
@@ -2315,18 +2315,24 @@ def _capture_single_pane(p: str, tail: int, rel_range: str, since_marker: str, f
             all_lines = lines[marker_idx + 1:] if marker_idx is not None else lines
     else:
         # No marker — tail-based capture is sufficient
+        has_grep = filter_kwargs.get('grep') or filter_kwargs.get('v')
         n_capture = max(tail, 100) if tail > 0 else 100
         if rel_range:
             start_off, end_off = parse_rel_range(rel_range)
             n_capture = max(abs(start_off) + 50, n_capture)
+        elif has_grep:
+            # grep needs full scrollback to search, not just tail lines
+            n_capture = 4000
         raw = run_tmux_cmd(["capture-pane", "-t", p, "-p", "-S", f"-{n_capture}"])
         all_lines = raw.rstrip().split('\n')
 
     if rel_range:
         start, end = parse_rel_range(rel_range)
         all_lines = all_lines[start:end]
-    elif tail > 0 and len(all_lines) > tail:
-        all_lines = all_lines[-tail:]
+    elif not (filter_kwargs.get('grep') or filter_kwargs.get('v')):
+        # tail slicing only when no grep — grep searches full range, then m= limits matches
+        if tail > 0 and len(all_lines) > tail:
+            all_lines = all_lines[-tail:]
 
     return apply_output_filters(all_lines, n_negative=True, **filter_kwargs)
 
