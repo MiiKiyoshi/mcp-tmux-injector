@@ -264,7 +264,7 @@ def send_tcl_code(session: str, code: str, begin: str, end: str) -> None:
     """Send TCL code with markers."""
     run_tmux_cmd(["send-keys", "-t", session, "-X", "cancel"], capture=False)
 
-    tcl_cmd = f'puts "{begin}"; if {{[catch {{\n\n{code}\n\n}} err]}} {{puts $err}}; puts "{end}"'
+    tcl_cmd = f'puts "{begin}"; if {{[catch {{\n\n{code}\n\n}} __r]}} {{puts $__r}} elseif {{$__r ne ""}} {{puts $__r}}; puts "{end}"'
     run_tmux_cmd(["send-keys", "-t", session, tcl_cmd], capture=False)
     run_tmux_cmd(["send-keys", "-t", session, "Enter"], capture=False)
 
