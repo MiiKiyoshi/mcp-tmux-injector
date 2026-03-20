@@ -29,9 +29,6 @@ dependencies = [
 [project.scripts]
 mcp-tmux-injector = "mcp_tmux_injector:main"
 
-[project.urls]
-Homepage = "https://github.com/kiyoshi/mcp-tmux-injector"
-Repository = "https://github.com/kiyoshi/mcp-tmux-injector"
 
 [tool.hatch.build.targets.wheel]
 include = ["mcp_tmux_injector.py"]

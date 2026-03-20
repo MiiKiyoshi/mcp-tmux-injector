@@ -127,6 +127,10 @@ Literal \n in code breaks tmux injection (\n becomes Enter key).
 All tools use exec(). Bare expressions produce no output. file= also uses exec().
     xpy(pane, "x") → empty. Use print(x).
 
+file= path is resolved relative to the client's (agent's) working directory, not the tmux pane's cwd.
+    xpy_start(pane, file="train.py")  # resolves to /home/user/project/train.py if agent cwd is /home/user/project
+    # The pane's cwd is irrelevant for file= resolution.
+
 Do not use import/reload in REPL. Use file= instead.
     xpy(pane, file="/path/to/module.py")
 
