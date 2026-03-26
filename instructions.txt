@@ -208,3 +208,7 @@ create_session()/create_window() registers as "managed".
 
 tmux kill-session, tmux kill-window via Bash: NEVER used.
 All session/window lifecycle is through MCP tools only.
+
+External sessions are user-owned. Structure modification (create_window, kill_window)
+on external sessions does not occur.
+New workspaces → create_session(). Existing external panes → set_pane() to register.
