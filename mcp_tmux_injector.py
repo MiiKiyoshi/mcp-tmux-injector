@@ -280,7 +280,7 @@ def send_shell_code(session: str, code: str, begin: str, end: str) -> None:
         run_tmux_cmd(["send-keys", "-t", session, line], capture=False)
         run_tmux_cmd(["send-keys", "-t", session, "Enter"], capture=False)
 
-    run_tmux_cmd(["send-keys", "-t", session, f"}} 2>&1; echo '{end}'"], capture=False)
+    run_tmux_cmd(["send-keys", "-t", session, f"}} 2>&1; echo; echo '{end}'"], capture=False)
     run_tmux_cmd(["send-keys", "-t", session, "Enter"], capture=False)
 
 
