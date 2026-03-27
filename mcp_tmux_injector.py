@@ -43,6 +43,7 @@ import shlex
 import threading
 import asyncio
 from mcp.server.fastmcp import FastMCP, Context
+from pydantic import Field
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -871,47 +872,23 @@ async def xpy(
     timeout: float = 60.0,
     tail: int = 0,
     head: int = None,
-    force: bool = False,
+    force: bool = Field(False, description="return full output without truncation"),
     grep: str = None,
-    v: str = None,
-    i: bool = False,
-    w: bool = False,
-    F: bool = False,
-    m: int = None,
-    A: int = None,
-    B: int = None,
-    C: int = None,
-    n: bool = False,
+    v: str = Field(None, description="exclude matching (grep -v)"),
+    i: bool = Field(False, description="case insensitive (grep -i)"),
+    w: bool = Field(False, description="whole word match (grep -w)"),
+    F: bool = Field(False, description="literal string, not regex (grep -F)"),
+    m: int = Field(None, description="max matching lines (grep -m)"),
+    A: int = Field(None, description="lines after match (grep -A)"),
+    B: int = Field(None, description="lines before match (grep -B)"),
+    C: int = Field(None, description="context lines around match (grep -C)"),
+    n: bool = Field(False, description="show line numbers (grep -n)"),
     uniq: bool = True,
-    strip_tqdm: bool = False,
+    strip_tqdm: bool = Field(False, description="remove tqdm lines, keep last group"),
     panes: list[str] = None,
     ctx: Context = None
 ) -> str:
-    """Execute Python code in tmux (blocking). Waits for completion.
-
-    Args:
-        pane: Single tmux pane (e.g., t1:1.0)
-        code: Python code to execute (same code for all panes)
-        codes: Different code per pane (1:1 with panes, mutually exclusive with code)
-        file: Python file to execute (alternative to code)
-        timeout: Timeout in seconds (default: 60)
-        tail: If > 0, return only the last N lines (default: 0 = all)
-        head: If provided, return only the first N lines
-        force: If True, return full output without truncation (default: False)
-        grep: Filter lines matching this regex pattern
-        v: Exclude lines matching this regex pattern (like grep -v)
-        i: Case insensitive matching (like grep -i)
-        w: Word match - pattern must match whole word (like grep -w)
-        F: Fixed string - treat pattern as literal, not regex (like grep -F)
-        m: Max count - return at most N matching lines (like grep -m)
-        A: Lines after grep match (like grep -A)
-        B: Lines before grep match (like grep -B)
-        C: Lines before and after grep match (like grep -C)
-        n: Show line numbers (like grep -n)
-        uniq: Remove consecutive duplicate lines (like uniq, default: True)
-        strip_tqdm: Remove tqdm progress lines, keeping only the last group
-        panes: Multiple panes to execute simultaneously (use pane OR panes, not both)
-    """
+    """Execute Python code in tmux (blocking). Waits for completion."""
     target_panes = _resolve_panes(pane, panes)
     _validate_multi(code, codes, "codes", target_panes)
 
@@ -953,45 +930,22 @@ async def xtcl(
     timeout: float = 60.0,
     tail: int = 0,
     head: int = None,
-    force: bool = False,
+    force: bool = Field(False, description="return full output without truncation"),
     grep: str = None,
-    v: str = None,
-    i: bool = False,
-    w: bool = False,
-    F: bool = False,
-    m: int = None,
-    A: int = None,
-    B: int = None,
-    C: int = None,
-    n: bool = False,
+    v: str = Field(None, description="exclude matching (grep -v)"),
+    i: bool = Field(False, description="case insensitive (grep -i)"),
+    w: bool = Field(False, description="whole word match (grep -w)"),
+    F: bool = Field(False, description="literal string, not regex (grep -F)"),
+    m: int = Field(None, description="max matching lines (grep -m)"),
+    A: int = Field(None, description="lines after match (grep -A)"),
+    B: int = Field(None, description="lines before match (grep -B)"),
+    C: int = Field(None, description="context lines around match (grep -C)"),
+    n: bool = Field(False, description="show line numbers (grep -n)"),
     uniq: bool = True,
-    strip_tqdm: bool = False,
+    strip_tqdm: bool = Field(False, description="remove tqdm lines, keep last group"),
     panes: list[str] = None
 ) -> str:
-    """Execute TCL code in tmux (blocking). For EDA tools like Innovus, OpenROAD.
-
-    Args:
-        pane: Single tmux pane (e.g., t1:1.0)
-        code: TCL code to execute (same code for all panes)
-        codes: Different code per pane (1:1 with panes, mutually exclusive with code)
-        timeout: Timeout in seconds (default: 60)
-        tail: If > 0, return only the last N lines (default: 0 = all)
-        head: If provided, return only the first N lines
-        force: If True, return full output without truncation (default: False)
-        grep: Filter lines matching this regex pattern
-        v: Exclude lines matching this regex pattern (like grep -v)
-        i: Case insensitive matching (like grep -i)
-        w: Word match - pattern must match whole word (like grep -w)
-        F: Fixed string - treat pattern as literal, not regex (like grep -F)
-        m: Max count - return at most N matching lines (like grep -m)
-        A: Lines after grep match (like grep -A)
-        B: Lines before grep match (like grep -B)
-        C: Lines before and after grep match (like grep -C)
-        n: Show line numbers (like grep -n)
-        uniq: Remove consecutive duplicate lines (like uniq, default: True)
-        strip_tqdm: Remove tqdm progress lines, keeping only the last group
-        panes: Multiple panes to execute simultaneously (use pane OR panes, not both)
-    """
+    """Execute TCL code in tmux (blocking). For EDA tools like Innovus, OpenROAD."""
     target_panes = _resolve_panes(pane, panes)
     _validate_multi(code, codes, "codes", target_panes)
 
@@ -1018,47 +972,23 @@ async def xsh(
     timeout: float = 60.0,
     tail: int = 0,
     head: int = None,
-    force: bool = False,
+    force: bool = Field(False, description="return full output without truncation"),
     grep: str = None,
-    v: str = None,
-    i: bool = False,
-    w: bool = False,
-    F: bool = False,
-    m: int = None,
-    A: int = None,
-    B: int = None,
-    C: int = None,
-    n: bool = False,
+    v: str = Field(None, description="exclude matching (grep -v)"),
+    i: bool = Field(False, description="case insensitive (grep -i)"),
+    w: bool = Field(False, description="whole word match (grep -w)"),
+    F: bool = Field(False, description="literal string, not regex (grep -F)"),
+    m: int = Field(None, description="max matching lines (grep -m)"),
+    A: int = Field(None, description="lines after match (grep -A)"),
+    B: int = Field(None, description="lines before match (grep -B)"),
+    C: int = Field(None, description="context lines around match (grep -C)"),
+    n: bool = Field(False, description="show line numbers (grep -n)"),
     uniq: bool = True,
-    strip_tqdm: bool = False,
+    strip_tqdm: bool = Field(False, description="remove tqdm lines, keep last group"),
     panes: list[str] = None,
     ctx: Context = None
 ) -> str:
-    """Execute shell command in tmux (blocking). Waits for completion.
-
-    Args:
-        pane: Single tmux pane (e.g., t1:1.0)
-        code: Shell command to execute
-        file: Shell script file to execute (alternative to code)
-        timeout: Timeout in seconds (default: 60)
-        tail: If > 0, return only the last N lines (default: 0 = all)
-        head: If provided, return only the first N lines
-        force: If True, return full output without truncation (default: False)
-        grep: Filter lines matching this regex pattern
-        v: Exclude lines matching this regex pattern (like grep -v)
-        i: Case insensitive matching (like grep -i)
-        w: Word match - pattern must match whole word (like grep -w)
-        F: Fixed string - treat pattern as literal, not regex (like grep -F)
-        m: Max count - return at most N matching lines (like grep -m)
-        A: Lines after grep match (like grep -A)
-        B: Lines before grep match (like grep -B)
-        C: Lines before and after grep match (like grep -C)
-        n: Show line numbers (like grep -n)
-        uniq: Remove consecutive duplicate lines (like uniq, default: True)
-        strip_tqdm: Remove tqdm progress lines, keeping only the last group
-        panes: Multiple panes to execute simultaneously (use pane OR panes, not both)
-        codes: Per-pane shell commands (1:1 with panes). Use code OR codes, not both.
-    """
+    """Execute shell command in tmux (blocking). Waits for completion."""
     target_panes = _resolve_panes(pane, panes)
     _validate_multi(code, codes, "codes", target_panes)
 
@@ -1188,15 +1118,7 @@ async def xpy_start(
 ) -> str:
     """Start Python code execution (non-blocking). Returns task_id immediately.
 
-    Use task_status for status, task_output for output, task_wait to block.
-
-    Args:
-        pane: Single tmux pane (e.g., t1:1.0)
-        code: Python code to execute
-        codes: Per-pane Python code (1:1 with panes). Use code OR codes, not both.
-        file: Python file to execute
-        panes: Multiple panes to start simultaneously (use pane OR panes, not both)
-    """
+    Use task_status for status, task_output for output, task_wait to block."""
     target_panes = _resolve_panes(pane, panes)
     _validate_multi(code, codes, "codes", target_panes)
 
@@ -1237,14 +1159,7 @@ async def xpy_start(
 
 @mcp.tool()
 def xtcl_start(pane: str = None, code: str = "", codes: list[str] = None, panes: list[str] = None) -> str:
-    """Start TCL code execution (non-blocking). Returns task_id immediately.
-
-    Args:
-        pane: Single tmux pane (e.g., t1:1.0)
-        code: TCL code to execute
-        codes: Per-pane TCL code (1:1 with panes). Use code OR codes, not both.
-        panes: Multiple panes to start simultaneously (use pane OR panes, not both)
-    """
+    """Start TCL code execution (non-blocking). Returns task_id immediately."""
     target_panes = _resolve_panes(pane, panes)
     _validate_multi(code, codes, "codes", target_panes)
 
@@ -1278,15 +1193,7 @@ async def xsh_start(
 ) -> str:
     """Start shell command execution (non-blocking). Returns task_id immediately.
 
-    Use task_status for status, task_output for output, task_wait to block.
-
-    Args:
-        pane: Single tmux pane (e.g., t1:1.0)
-        code: Shell command to execute
-        codes: Per-pane shell commands (1:1 with panes). Use code OR codes, not both.
-        file: Shell script file to execute
-        panes: Multiple panes to start simultaneously (use pane OR panes, not both)
-    """
+    Use task_status for status, task_output for output, task_wait to block."""
     target_panes = _resolve_panes(pane, panes)
     _validate_multi(code, codes, "codes", target_panes)
 
@@ -1320,12 +1227,7 @@ async def xsh_start(
 
 @mcp.tool()
 def task_status(task_id: str = None, pane: str = None) -> str:
-    """Check task status (non-blocking). Returns status and elapsed time only.
-
-    Args:
-        task_id: Task ID from xpy_start, xtcl_start, or xsh_start
-        pane: Pane to look up active task (use task_id OR pane, not both)
-    """
+    """Check task status (non-blocking). Returns status and elapsed time only."""
     resolved_id = _resolve_task_id(task_id, pane)
     if resolved_id not in _tasks:
         raise ValueError(f"Task '{resolved_id}' not found")
@@ -1417,17 +1319,17 @@ def task_output(
     head: int = None,
     range: str = None,
     grep: str = None,
-    v: str = None,
-    i: bool = False,
-    w: bool = False,
-    F: bool = False,
-    m: int = None,
-    A: int = None,
-    B: int = None,
-    C: int = None,
-    n: bool = False,
+    v: str = Field(None, description="exclude matching (grep -v)"),
+    i: bool = Field(False, description="case insensitive (grep -i)"),
+    w: bool = Field(False, description="whole word match (grep -w)"),
+    F: bool = Field(False, description="literal string, not regex (grep -F)"),
+    m: int = Field(None, description="max matching lines (grep -m)"),
+    A: int = Field(None, description="lines after match (grep -A)"),
+    B: int = Field(None, description="lines before match (grep -B)"),
+    C: int = Field(None, description="context lines around match (grep -C)"),
+    n: bool = Field(False, description="show line numbers (grep -n)"),
     uniq: bool = True,
-    strip_tqdm: bool = False,
+    strip_tqdm: bool = Field(False, description="remove tqdm lines, keep last group"),
     save: str = None,
     append: bool = True,
     prefix: str = None,
@@ -1436,36 +1338,7 @@ def task_output(
     command_prefix: str = "$ ",
     markdown: bool = False
 ) -> str:
-    """Get task output (non-blocking).
-
-    Args:
-        task_id: Single task ID (use task_id OR task_ids, not both)
-        task_ids: Multiple task IDs to get output simultaneously
-        pane: Look up active task on this pane (alternative to task_id)
-        panes: Look up active tasks on these panes (alternative to task_ids)
-        tail: If > 0, return only the last N lines (default: 0 = all)
-        head: If provided, return only the first N lines
-        range: Line range, e.g., "10:20" (0-indexed, within marker output)
-        grep: Filter lines matching this regex pattern
-        v: Exclude lines matching this regex pattern (like grep -v)
-        i: Case insensitive matching (like grep -i)
-        w: Word match - pattern must match whole word (like grep -w)
-        F: Fixed string - treat pattern as literal, not regex (like grep -F)
-        m: Max count - return at most N matching lines (like grep -m)
-        A: Lines after grep match (like grep -A)
-        B: Lines before grep match (like grep -B)
-        C: Lines before and after grep match (like grep -C)
-        n: Show line numbers (like grep -n)
-        uniq: Remove consecutive duplicate lines (like uniq, default: True)
-        strip_tqdm: Remove tqdm progress lines, keeping only the last group
-        save: File path to save output (optional)
-        append: If True, append to file (>>); if False, overwrite (>)
-        prefix: Text to prepend before output (when saving)
-        suffix: Text to append after output (when saving)
-        include_command: If True, prepend command to output (when saving)
-        command_prefix: Prefix for include_command (default: "$ "). E.g., "pt_shell> ", ">>> "
-        markdown: If True, wrap output in ```lang ... ``` code block (when saving)
-    """
+    """Get task output (non-blocking)."""
     # Resolve pane/panes to task_id/task_ids
     if pane is not None:
         task_id = _resolve_task_id(None, pane)
@@ -1529,18 +1402,9 @@ async def _wait_single_task(task_id: str, timeout: float) -> str:
 async def task_wait(
     task_id: str = None, task_ids: list[str] = None,
     pane: str = None, panes: list[str] = None,
-    timeout: float = 60.0, race: bool = False
+    timeout: float = 60.0, race: bool = Field(False, description="return when ANY task completes (vs all)")
 ) -> str:
-    """Wait for task completion (blocking). Returns status only.
-
-    Args:
-        task_id: Single task ID (mutually exclusive with task_ids)
-        task_ids: Multiple task IDs to wait simultaneously (mutually exclusive with task_id)
-        pane: Look up active task on this pane (alternative to task_id)
-        panes: Look up active tasks on these panes (alternative to task_ids)
-        timeout: Max wait time in seconds
-        race: If True with task_ids, return when ANY task completes (default: wait for ALL)
-    """
+    """Wait for task completion (blocking). Returns status only."""
     # Resolve pane/panes to task_id/task_ids
     if pane is not None:
         task_id = _resolve_task_id(None, pane)
@@ -1590,11 +1454,7 @@ async def task_wait(
 
 @mcp.tool()
 def task_list(all: bool = False) -> str:
-    """List background tasks. By default shows running only.
-
-    Args:
-        all: If True, include completed tasks (default: running only)
-    """
+    """List background tasks. By default shows running only."""
     if not _tasks:
         return "No tasks"
 
@@ -1634,11 +1494,7 @@ def task_list(all: bool = False) -> str:
 
 @mcp.tool()
 def task_cancel(task_id: str) -> str:
-    """Cancel/forget a background task (does not stop execution in tmux).
-
-    Args:
-        task_id: Task ID to cancel
-    """
+    """Cancel/forget a background task (does not stop execution in tmux)."""
     if task_id not in _tasks:
         raise ValueError(f"Task '{task_id}' not found")
 
@@ -1658,13 +1514,7 @@ def ls(session: str = None, window: str = None, gpu: bool = False) -> str:
 
     Without session: compact summary (session name, status, window count).
     With session: detailed tree with PID, process, cwd.
-    With gpu=True: adds per-pane GPU device and memory from gpustat.
-
-    Args:
-        session: Filter to specific session (enables detailed mode)
-        window: Filter to specific window (requires session)
-        gpu: Show GPU memory per pane (requires session)
-    """
+    With gpu=True: adds per-pane GPU device and memory from gpustat."""
     if window and not session:
         raise ValueError("'window' requires 'session'")
     if gpu and not session:
@@ -1832,15 +1682,7 @@ def ls(session: str = None, window: str = None, gpu: bool = False) -> str:
 
 @mcp.tool()
 def create_session(name: str, windows: list[str] = None, start_dir: str = None, cmd: str = None, cmds: list[str] = None) -> str:
-    """Create a new tmux session (managed). Auto-registers all panes.
-
-    Args:
-        name: Session name
-        windows: Window names to create (default: one window named "main")
-        start_dir: Starting directory for the session
-        cmd: Shell command to run in each window instead of default shell
-        cmds: Per-window commands (1:1 with windows). Use cmd OR cmds, not both.
-    """
+    """Create a new tmux session (managed). Auto-registers all panes."""
     if check_session(name):
         raise ValueError(
             f"Session '{name}' already exists.\n\n"
@@ -1884,16 +1726,11 @@ def create_session(name: str, windows: list[str] = None, start_dir: str = None, 
 
 
 @mcp.tool()
-def kill_session(name: str, force: bool = False) -> str:
+def kill_session(name: str, force: bool = Field(False, description="force kill external (non-managed) session")) -> str:
     """Kill a tmux session.
 
     Managed sessions (created by MCP) are killed immediately.
-    External sessions require force=True (user confirmation via Claude Code).
-
-    Args:
-        name: Session name to kill
-        force: Required for external sessions
-    """
+    External sessions require force=True (user confirmation via Claude Code)."""
     if not check_session(name):
         raise ValueError(f"Session '{name}' does not exist")
 
@@ -1909,14 +1746,7 @@ def kill_session(name: str, force: bool = False) -> str:
 
 @mcp.tool()
 def create_window(session: str, name: str, start_dir: str = None, cmd: str = None) -> str:
-    """Create a new window in an existing session (managed). Auto-registers pane.
-
-    Args:
-        session: Session name
-        name: Window name
-        start_dir: Starting directory
-        cmd: Shell command to run instead of default shell
-    """
+    """Create a new window in an existing session (managed). Auto-registers pane."""
     if not check_session(session):
         raise ValueError(f"Session '{session}' does not exist")
 
@@ -1946,17 +1776,11 @@ def create_window(session: str, name: str, start_dir: str = None, cmd: str = Non
 
 
 @mcp.tool()
-def kill_window(session: str, window: str, force: bool = False) -> str:
+def kill_window(session: str, window: str, force: bool = Field(False, description="force kill external (non-managed) window")) -> str:
     """Kill a window in a tmux session.
 
     Managed windows are killed immediately.
-    External windows require force=True.
-
-    Args:
-        session: Session name
-        window: Window name
-        force: Required for external windows
-    """
+    External windows require force=True."""
     if not check_session(session):
         raise ValueError(f"Session '{session}' does not exist")
 
@@ -1975,12 +1799,7 @@ def kill_window(session: str, window: str, force: bool = False) -> str:
 
 @mcp.tool()
 def set_pane(pane: str, description: str) -> str:
-    """Register a pane for use. Re-calling updates description.
-
-    Args:
-        pane: tmux target (e.g., t1:1.0, t1:2.1)
-        description: What this pane is for (e.g., "OpenROAD Python REPL")
-    """
+    """Register a pane for use. Re-calling updates description."""
     if not check_session(pane):
         raise ValueError(f"Pane '{pane}' not found in tmux")
 
@@ -1991,11 +1810,7 @@ def set_pane(pane: str, description: str) -> str:
 
 @mcp.tool()
 def remove_pane(pane: str) -> str:
-    """Unregister a pane.
-
-    Args:
-        pane: tmux target to unregister
-    """
+    """Unregister a pane."""
     if pane not in _working_panes:
         raise ValueError(f"Pane '{pane}' is not registered")
 
@@ -2026,15 +1841,7 @@ def _respawn_single(pane: str, start_dir: str = None, cmd: str = None) -> str:
 @mcp.tool()
 def respawn_pane(pane: str = None, panes: list[str] = None, start_dir: str = None, cmd: str = None, cmds: list[str] = None) -> str:
     """Kill the running process in a pane and start a fresh shell.
-    Cleans up associated tasks and locks. Registration (description/owner) is preserved.
-
-    Args:
-        pane: Single pane to respawn
-        panes: Multiple panes to respawn in parallel
-        start_dir: Working directory for the new shell
-        cmd: Shell command to run instead of default shell
-        cmds: Per-pane commands (1:1 with panes). Use cmd OR cmds, not both.
-    """
+    Cleans up associated tasks and locks. Registration (description/owner) is preserved."""
     multi = _resolve_panes(pane, panes)
     _validate_multi(cmd, cmds, "cmds", multi)
     if multi is not None:
@@ -2140,15 +1947,7 @@ async def xpy_peek(
     wait: float = 1.0,
     panes: list[str] = None
 ) -> str:
-    """Execute Python code and capture output for a short time (no end marker wait).
-
-    Args:
-        pane: Single tmux pane (e.g., t1:1.0)
-        code: Python code to execute
-        codes: Per-pane Python code (1:1 with panes). Use code OR codes, not both.
-        wait: Seconds to wait before capturing (default: 1.0)
-        panes: Multiple panes (use pane OR panes, not both)
-    """
+    """Execute Python code and capture output for a short time (no end marker wait)."""
     target_panes = _resolve_panes(pane, panes)
     _validate_multi(code, codes, "codes", target_panes)
     if target_panes is not None:
@@ -2168,15 +1967,7 @@ async def xtcl_peek(
     wait: float = 1.0,
     panes: list[str] = None
 ) -> str:
-    """Execute TCL code and capture output for a short time (no end marker wait).
-
-    Args:
-        pane: Single tmux pane (e.g., t1:1.0)
-        code: TCL code to execute
-        codes: Per-pane TCL code (1:1 with panes). Use code OR codes, not both.
-        wait: Seconds to wait before capturing (default: 1.0)
-        panes: Multiple panes (use pane OR panes, not both)
-    """
+    """Execute TCL code and capture output for a short time (no end marker wait)."""
     target_panes = _resolve_panes(pane, panes)
     _validate_multi(code, codes, "codes", target_panes)
     if target_panes is not None:
@@ -2196,15 +1987,7 @@ async def xsh_peek(
     wait: float = 1.0,
     panes: list[str] = None
 ) -> str:
-    """Execute shell command and capture output for a short time (no end marker wait).
-
-    Args:
-        pane: Single tmux pane (e.g., t1:1.0)
-        code: Shell command to execute
-        codes: Per-pane shell commands (1:1 with panes). Use code OR codes, not both.
-        wait: Seconds to wait before capturing (default: 1.0)
-        panes: Multiple panes (use pane OR panes, not both)
-    """
+    """Execute shell command and capture output for a short time (no end marker wait)."""
     target_panes = _resolve_panes(pane, panes)
     _validate_multi(code, codes, "codes", target_panes)
     if target_panes is not None:
@@ -2217,15 +2000,8 @@ async def xsh_peek(
 
 
 @mcp.tool()
-def send_text(pane: str = None, text: str = "", enter: bool = True, panes: list[str] = None) -> str:
-    """Send text string to pane(s). For commands, passwords, etc.
-
-    Args:
-        pane: Single tmux pane (e.g., t1:1.0)
-        text: Text to send as-is
-        enter: Press Enter after text (default: True)
-        panes: Multiple panes to send simultaneously (use pane OR panes, not both)
-    """
+def send_text(pane: str = None, text: str = "", enter: bool = Field(True, description="press Enter after text"), panes: list[str] = None) -> str:
+    """Send text string to pane(s). For commands, passwords, etc."""
     target_panes = _resolve_panes(pane, panes)
 
     if target_panes is not None:
@@ -2252,15 +2028,8 @@ def send_text(pane: str = None, text: str = "", enter: bool = True, panes: list[
 
 
 @mcp.tool()
-def send_keys(pane: str = None, keys: str = "", enter: bool = False, panes: list[str] = None) -> str:
-    """Send special keys to pane(s). For C-c, Enter, Escape, arrow keys, etc.
-
-    Args:
-        pane: Single tmux pane (e.g., t1:1.0)
-        keys: Space-separated special keys (e.g., "C-c C-c C-c", "Up Up Enter")
-        enter: Press Enter after keys (default: False)
-        panes: Multiple panes to send simultaneously (use pane OR panes, not both)
-    """
+def send_keys(pane: str = None, keys: str = "", enter: bool = Field(False, description="press Enter after keys"), panes: list[str] = None) -> str:
+    """Send special keys to pane(s). For C-c, Enter, Escape, arrow keys, etc."""
     target_panes = _resolve_panes(pane, panes)
 
     if target_panes is not None:
@@ -2341,51 +2110,27 @@ def _capture_single_pane(p: str, tail: int, rel_range: str, since_marker: str, f
 def capture_pane(
     pane: str = None,
     tail: int = 5,
-    rel_range: str = None,
+    rel_range: str = Field(None, description="relative range from end, e.g. '100:50'"),
     grep: str = None,
-    v: str = None,
-    i: bool = False,
-    w: bool = False,
-    F: bool = False,
-    m: int = None,
-    A: int = None,
-    B: int = None,
-    C: int = None,
-    since_marker: str = None,
+    v: str = Field(None, description="exclude matching (grep -v)"),
+    i: bool = Field(False, description="case insensitive (grep -i)"),
+    w: bool = Field(False, description="whole word match (grep -w)"),
+    F: bool = Field(False, description="literal string, not regex (grep -F)"),
+    m: int = Field(None, description="max matching lines (grep -m)"),
+    A: int = Field(None, description="lines after match (grep -A)"),
+    B: int = Field(None, description="lines before match (grep -B)"),
+    C: int = Field(None, description="context lines around match (grep -C)"),
+    since_marker: str = Field(None, description="only capture after this marker"),
     uniq: bool = True,
-    n: bool = False,
-    strip_tqdm: bool = False,
+    n: bool = Field(False, description="show line numbers (grep -n)"),
+    strip_tqdm: bool = Field(False, description="remove tqdm lines, keep last group"),
     save: str = None,
     append: bool = True,
     prefix: str = None,
     suffix: str = None,
     panes: list[str] = None
 ) -> str:
-    """Capture current pane content.
-
-    Args:
-        pane: Single tmux pane (e.g., t1:1.0)
-        tail: Number of lines to capture from end (default: 5)
-        rel_range: Relative range from end, e.g., "100:50" (100th from end to 50th from end)
-        grep: Filter lines matching this regex pattern
-        v: Exclude lines matching this regex pattern (like grep -v)
-        i: Case insensitive matching (like grep -i)
-        w: Word match - pattern must match whole word (like grep -w)
-        F: Fixed string - treat pattern as literal, not regex (like grep -F)
-        m: Max count - return at most N matching lines (like grep -m)
-        A: Lines after grep match (like grep -A)
-        B: Lines before grep match (like grep -B)
-        C: Lines before and after grep match (like grep -C)
-        since_marker: Only capture lines after this marker
-        uniq: Remove consecutive duplicate lines (like uniq, default: True)
-        n: Show line numbers as negative indices from end (like nl/cat -n)
-        strip_tqdm: Remove tqdm progress lines, keeping only the last group
-        save: File path to save output (optional)
-        append: If True, append to file (>>); if False, overwrite (>)
-        prefix: Text to prepend when saving (optional)
-        suffix: Text to append when saving (optional)
-        panes: Multiple panes to capture simultaneously (use pane OR panes, not both)
-    """
+    """Capture current pane content."""
     target_panes = _resolve_panes(pane, panes)
     fkw = dict(grep=grep, v=v, i=i, w=w, F=F, m=m, A=A, B=B, C=C, n=n,
                uniq=uniq, save=save, append=append, prefix=prefix, suffix=suffix,
