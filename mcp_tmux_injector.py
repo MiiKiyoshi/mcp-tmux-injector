@@ -181,7 +181,7 @@ def acquire_pane_lock(pane: str) -> threading.Lock:
 
 def _wrap_cmd(cmd: str) -> str:
     """Wrap cmd in bash so pane survives process exit/crash."""
-    return f"bash -c {shlex.quote(cmd + '; exec bash')}"
+    return f"bash -c {shlex.quote('{ . ~/.bashrc; } 2>/dev/null; ' + cmd + '; exec bash')}"
 
 
 def run_tmux_cmd(args: list[str], capture: bool = True, raise_on_error: bool = False) -> str:
