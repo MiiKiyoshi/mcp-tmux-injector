@@ -1452,6 +1452,115 @@ async def task_wait(
     return '\n'.join(f"{tid}: {res}" for tid, res in zip(task_ids, results))
 
 
+_FINGERPRINT_SIZE = 5
+
+
+def _find_fingerprint(lines: list[str], fingerprint: list[str]) -> int | None:
+    """Find the LAST occurrence of fingerprint sequence in lines.
+
+    Returns the index of the first line AFTER the fingerprint match,
+    or None if not found.
+    """
+    fp_len = len(fingerprint)
+    if fp_len == 0:
+        return None
+    last_match = None
+    for i in range(len(lines) - fp_len + 1):
+        if lines[i:i + fp_len] == fingerprint:
+            last_match = i + fp_len
+    return last_match
+
+
+@mcp.tool()
+async def poll_pane(
+    pane: str = None,
+    pattern: str = "",
+    timeout: float = 300.0,
+    tail: int = 200,
+    fresh: bool = Field(True, description="ignore pre-existing content (default True)"),
+    i: bool = Field(False, description="case insensitive match"),
+    F: bool = Field(False, description="literal string, not regex"),
+    A: int = Field(None, description="lines after match"),
+    B: int = Field(None, description="lines before match"),
+    C: int = Field(None, description="context lines around match"),
+) -> str:
+    """Poll pane until pattern appears. Blocks until match or timeout.
+
+    Uses exponential backoff (0.5s → 10s cap) like task_wait.
+    With fresh=True (default), ignores pre-existing scrollback content
+    by fingerprinting the initial state.
+    Returns matched lines with optional context.
+    """
+    if pane is None:
+        raise ValueError("pane is required")
+    check_pane_registered(pane)
+    if not check_session(pane):
+        raise ValueError(f"Pane '{pane}' not found in tmux")
+    p = pane
+
+    if not pattern:
+        raise ValueError("pattern is required")
+
+    flags = re.IGNORECASE if i else 0
+    pat = re.escape(pattern) if F else pattern
+    regex = re.compile(pat, flags)
+
+    # Capture initial fingerprint for fresh mode
+    fingerprint = []
+    if fresh:
+        raw = run_tmux_cmd(
+            ["capture-pane", "-t", p, "-p", "-S", f"-{tail}"],
+            raise_on_error=True,
+        )
+        initial_lines = raw.rstrip().split('\n')
+        fp_size = min(_FINGERPRINT_SIZE, len(initial_lines))
+        fingerprint = initial_lines[-fp_size:] if fp_size > 0 else []
+
+    start_time = time.time()
+    interval = 0.5
+    max_interval = 10.0
+
+    while time.time() - start_time < timeout:
+        raw = run_tmux_cmd(
+            ["capture-pane", "-t", p, "-p", "-S", f"-{tail}"],
+            raise_on_error=True,
+        )
+        lines = raw.rstrip().split('\n')
+
+        # Determine which lines to search
+        if fresh and fingerprint:
+            fp_end = _find_fingerprint(lines, fingerprint)
+            if fp_end is not None:
+                search_lines = lines[fp_end:]
+            else:
+                # Fingerprint scrolled out — all captured content is new
+                search_lines = lines
+        else:
+            search_lines = lines
+
+        matched_indices = [idx for idx, line in enumerate(search_lines) if regex.search(line)]
+        if matched_indices:
+            before = B if B is not None else (C or 0)
+            after = A if A is not None else (C or 0)
+            result_lines = []
+            included = set()
+            for idx in matched_indices:
+                lo = max(0, idx - before)
+                hi = min(len(search_lines), idx + after + 1)
+                for j in range(lo, hi):
+                    if j not in included:
+                        included.add(j)
+                        result_lines.append(search_lines[j])
+            elapsed = time.time() - start_time
+            header = f"[matched] {len(matched_indices)} hit(s) after {elapsed:.1f}s"
+            return header + '\n' + '\n'.join(result_lines)
+
+        await asyncio.sleep(interval)
+        interval = min(interval * 2, max_interval)
+
+    raise TimeoutError(f"Pattern '{pattern}' not found in pane '{p}' within {timeout}s")
+
+
 @mcp.tool()
 def task_list(all: bool = False) -> str:
     """List background tasks. By default shows running only."""
@@ -2084,22 +2193,17 @@ def _capture_single_pane(p: str, tail: int, rel_range: str, since_marker: str, f
             all_lines = lines[marker_idx + 1:] if marker_idx is not None else lines
     else:
         # No marker — tail-based capture is sufficient
-        has_grep = filter_kwargs.get('grep') or filter_kwargs.get('v')
         n_capture = max(tail, 100) if tail > 0 else 100
         if rel_range:
             start_off, end_off = parse_rel_range(rel_range)
             n_capture = max(abs(start_off) + 50, n_capture)
-        elif has_grep:
-            # grep needs full scrollback to search, not just tail lines
-            n_capture = 4000
         raw = run_tmux_cmd(["capture-pane", "-t", p, "-p", "-S", f"-{n_capture}"])
         all_lines = raw.rstrip().split('\n')
 
     if rel_range:
         start, end = parse_rel_range(rel_range)
         all_lines = all_lines[start:end]
-    elif not (filter_kwargs.get('grep') or filter_kwargs.get('v')):
-        # tail slicing only when no grep — grep searches full range, then m= limits matches
+    else:
         if tail > 0 and len(all_lines) > tail:
             all_lines = all_lines[-tail:]
 

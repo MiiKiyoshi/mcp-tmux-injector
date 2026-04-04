@@ -40,12 +40,39 @@
 | pane 순서 회전 | `Ctrl+b Ctrl+o` |
 | pane 번호 확인 | `Ctrl+b q` |
 | 현재 pane 닫기 | `Ctrl+b x` (확인 y) |
+| copy-mode 진입 (스크롤) | `Ctrl+b [` |
 
 **Session**
 
 | 동작 | 키 |
 | --- | --- |
 | 세션에서 빠져나오기 (유지) | `Ctrl+b d` |
+
+### 필수 설정
+
+`~/.tmux.conf`에 넣을 최소 설정.
+
+```bash
+# 미설정 시 TERM=screen (8색) → htop 등 Text UI 앱 컬러 빈약
+set -g default-terminal "tmux-256color"
+
+# OSC 52 지원 터미널에서 원격 SSH 클립보드 복사 활성화
+set -g set-clipboard on
+# GNOME 계열 터미널(GNOME Terminal, Terminator 등)에서 OSC 52가 작동하려면 필요
+set -ag terminal-overrides "vte*:xt:ms=\\e]52;c;%p2%s\\7"
+
+# 기본값 emacs, vi 사용자에게 불편
+setw -g mode-keys vi
+# copy-mode에서 v로 선택, y로 복사 (vim 스타일)
+bind-key -T copy-mode-vi v send-keys -X begin-selection
+bind-key -T copy-mode-vi y send-keys -X copy-selection-and-cancel
+
+# 미설정 시 마우스 스크롤·pane 선택 불가
+set -g mouse on
+
+# 기본값 2000줄, 로그 많은 작업에서 부족
+set-option -g history-limit 50000
+```
 
 ---
 
