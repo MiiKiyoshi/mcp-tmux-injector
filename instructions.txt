@@ -28,6 +28,10 @@ This describes how you use tmux-injector tools. This is how the system works.
 ├─ Check current screen
 │   └─→ capture_pane
 │
+├─ Wait for specific output to appear (no task_id)
+│   └─→ poll_pane (blocks until pattern matched or timeout)
+│       fresh=True (default): ignores pre-existing content
+│
 └─ Check sessions, processes, GPU memory
     └─→ ls (compact overview), ls(session=, gpu=True) (detailed + GPU)
 
@@ -58,6 +62,12 @@ Waiting for long-running tasks:
 Without monitoring (no task_id):
     xsh_peek(pane, "python3 train.py", wait=2)
     capture_pane(pane, tail=30)
+
+Waiting for specific output (no task_id):
+    xsh_peek(pane, "make build", wait=1)
+    poll_pane(pane, pattern="Build complete|ERROR", timeout=120)
+    # blocks until pattern appears, returns matched lines
+    # fresh=True (default): ignores pre-existing scrollback
 
 SSH connection:
     xsh_peek(pane, "ssh user@host", wait=2)
@@ -142,7 +152,19 @@ Semicolons work only for simple statements.
     """)
 
 ==========
-6. STATE TRACKING
+6. capture_pane: tail AND grep
+==========
+
+tail= defines the visible window. grep= searches within that window.
+    capture_pane(pane, tail=30)                    # last 30 lines
+    capture_pane(pane, tail=30, grep="ERROR")      # last 30 lines, then grep
+    capture_pane(pane, grep="ERROR")               # last 100 lines (default), then grep
+
+grep does NOT expand the capture range. To search deeper scrollback, increase tail:
+    capture_pane(pane, tail=4000, grep="FATAL")    # search last 4000 lines
+
+==========
+7. STATE TRACKING
 ==========
 
 Pane state is tracked in memory. capture_pane is not called before every command.
@@ -164,7 +186,7 @@ capture_pane is NOT for polling task progress.
 When task_id exists (from xpy_start/xsh_start/xtcl_start), use task_wait.
 
 ==========
-7. ABORT/TIMEOUT BEHAVIOR
+8. ABORT/TIMEOUT BEHAVIOR
 ==========
 
 Abort/timeout means "end marker not received", not "command not sent".
@@ -185,7 +207,7 @@ task_cancel removes tracking only — execution in tmux continues.
 To actually stop: send_keys(pane, "C-c") first, then task_cancel.
 
 ==========
-8. CONVERSATION CONTINUITY
+9. CONVERSATION CONTINUITY
 ==========
 
 Registered panes persist in MCP server memory across conversation compaction.
@@ -200,7 +222,7 @@ Task tracking lost on MCP server restart:
     the marker queues in stdin and executes when the current job finishes.
 
 ==========
-9. OWNERSHIP MODEL
+10. OWNERSHIP MODEL
 ==========
 
 set_pane() auto-registers the session/window as "external".
