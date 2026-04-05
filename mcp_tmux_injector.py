@@ -181,7 +181,9 @@ def acquire_pane_lock(pane: str) -> threading.Lock:
 
 def _wrap_cmd(cmd: str) -> str:
     """Wrap cmd in bash so pane survives process exit/crash."""
-    return f"bash -c {shlex.quote('{ . ~/.bashrc; } 2>/dev/null; ' + cmd + '; exec bash')}"
+    # Strip any .venv from PATH so pane gets clean environment
+    clean_path = 'unset VIRTUAL_ENV; PATH=$(echo "$PATH" | tr ":" "\\n" | grep -v "/.venv/" | tr "\\n" ":"); '
+    return f"bash -c {shlex.quote(clean_path + '{ . ~/.bashrc; } 2>/dev/null; ' + cmd + '; exec bash')}"
 
 
 def run_tmux_cmd(args: list[str], capture: bool = True, raise_on_error: bool = False) -> str:
@@ -237,28 +239,32 @@ def generate_task_id_and_marker() -> tuple[str, str, str]:
 def send_python_code(session: str, code: str, begin: str, end: str) -> None:
     """Send Python code wrapped in try/except with markers.
 
-    Uses single-line exec approach for compatibility with both Python REPL and innovus_py.
+    Writes code to a temp file to keep pane output clean (no base64 noise).
     """
+    import textwrap, tempfile
     run_tmux_cmd(["send-keys", "-t", session, "-X", "cancel"], capture=False)
 
-    # Escape backslashes and single quotes
-    code_escaped = code.replace('\\', '\\\\').replace("'", "\\'")
+    # 1. Write temp files: preview (original code) + exec (try/except wrapped)
+    full_code = f"try:\n{textwrap.indent(code, '    ')}\nexcept:\n    __import__('traceback').print_exc()"
+    preview_tmp = tempfile.NamedTemporaryFile(mode='w', prefix='_tmux_preview_', suffix='.py', dir='/tmp', delete=False)
+    preview_tmp.write(code)
+    preview_tmp.close()
+    exec_tmp = tempfile.NamedTemporaryFile(mode='w', prefix='_tmux_exec_', suffix='.py', dir='/tmp', delete=False)
+    exec_tmp.write(full_code)
+    exec_tmp.close()
 
-    # For display: join lines with \n (will be interpreted as newline by Python)
-    code_display = code_escaped.replace('\n', '\\n')
-
-    # For exec: indent each line by 4 spaces, join with \n
-    code_indented = '\\n'.join('    ' + line for line in code_escaped.split('\n'))
-
-    # 1. Code preview (before BEGIN, for readability)
-    run_tmux_cmd(["send-keys", "-t", session, f"print(); print('{code_display}'); print()"], capture=False)
-    run_tmux_cmd(["send-keys", "-t", session, "Enter"], capture=False)
-
-    # 2. Single-line execution with try/except
-    exec_cmd = f"print('{begin}'); print(); exec('try:\\n{code_indented}\\nexcept: __import__(\\'traceback\\').print_exc()'); print(); print('{end}')"
+    # 2. Code preview + execution
+    exec_cmd = f"print(open('{preview_tmp.name}').read()); print('{begin}'); print(); exec(open('{exec_tmp.name}').read()); print(); print('{end}')"
     run_tmux_cmd(["send-keys", "-t", session, exec_cmd], capture=False)
     run_tmux_cmd(["send-keys", "-t", session, "Enter"], capture=False)
-    time.sleep(0.05)  # Ensure tmux processes Enter before next command
+    time.sleep(0.05)
+
+    # Cleanup after delay
+    def _cleanup():
+        for p in (preview_tmp.name, exec_tmp.name):
+            try: os.unlink(p)
+            except OSError: pass
+    threading.Timer(5.0, _cleanup).start()
 
 
 def send_tcl_code(session: str, code: str, begin: str, end: str) -> None:
@@ -285,9 +291,14 @@ def send_shell_code(session: str, code: str, begin: str, end: str) -> None:
     run_tmux_cmd(["send-keys", "-t", session, "Enter"], capture=False)
 
 
+def _split_capture(raw: str) -> list[str]:
+    """Split capture-pane output into lines, stripping -J trailing spaces."""
+    return [line.rstrip() for line in raw.rstrip().split('\n')]
+
+
 def extract_output(raw: str, begin: str, end: str) -> tuple[str, bool]:
     """Extract output between markers. Returns (output, is_complete)."""
-    lines = raw.split('\n')
+    lines = _split_capture(raw)
     capturing = False
     result = []
     completed = False
@@ -555,12 +566,12 @@ def apply_output_filters(
 def check_task_output(session: str, begin: str, end: str) -> tuple[str, bool]:
     """Check current output for a task. Returns (output, is_complete)."""
     for n_lines in [1000, 4000, 16000]:
-        raw = run_tmux_cmd(["capture-pane", "-t", session, "-p", "-S", f"-{n_lines}"])
+        raw = run_tmux_cmd(["capture-pane", "-t", session, "-p", "-J", "-S", f"-{n_lines}"])
         output, completed = extract_output(raw, begin, end)
         if completed or begin in raw:
             return output, completed
     # fallback: full scrollback
-    raw = run_tmux_cmd(["capture-pane", "-t", session, "-p", "-S", "-"])
+    raw = run_tmux_cmd(["capture-pane", "-t", session, "-p", "-J", "-S", "-"])
     return extract_output(raw, begin, end)
 
 
@@ -888,7 +899,7 @@ async def xpy(
     panes: list[str] = None,
     ctx: Context = None
 ) -> str:
-    """Execute Python code in tmux (blocking). Waits for completion."""
+    """Execute Python code in tmux (blocking). On abort/timeout, code was already sent — do NOT resend."""
     target_panes = _resolve_panes(pane, panes)
     _validate_multi(code, codes, "codes", target_panes)
 
@@ -903,13 +914,6 @@ async def xpy(
 
     if not code and not codes:
         raise ValueError("Either 'code', 'codes', or 'file' must be provided")
-
-    if code and "\\n" in code:
-        raise ValueError("Code contains \\n which breaks tmux injection. Use print() for blank lines.")
-    if codes:
-        for c in codes:
-            if "\\n" in c:
-                raise ValueError("Code contains \\n which breaks tmux injection. Use print() for blank lines.")
 
     fkw = dict(grep=grep, v=v, i=i, w=w, F=F, m=m, A=A, B=B, C=C, n=n, uniq=uniq, strip_tqdm=strip_tqdm)
 
@@ -945,7 +949,7 @@ async def xtcl(
     strip_tqdm: bool = Field(False, description="remove tqdm lines, keep last group"),
     panes: list[str] = None
 ) -> str:
-    """Execute TCL code in tmux (blocking). For EDA tools like Innovus, OpenROAD."""
+    """Execute TCL code in tmux (blocking). On abort/timeout, code was already sent — do NOT resend."""
     target_panes = _resolve_panes(pane, panes)
     _validate_multi(code, codes, "codes", target_panes)
 
@@ -988,7 +992,7 @@ async def xsh(
     panes: list[str] = None,
     ctx: Context = None
 ) -> str:
-    """Execute shell command in tmux (blocking). Waits for completion."""
+    """Execute shell command in tmux (blocking). On abort/timeout, code was already sent — do NOT resend."""
     target_panes = _resolve_panes(pane, panes)
     _validate_multi(code, codes, "codes", target_panes)
 
@@ -1044,8 +1048,8 @@ def _finalize_task(task: dict) -> None:
 
 def _check_end_marker(pane: str, end: str, tail: int = 200) -> bool:
     """Lightweight completion check: only look for end marker in tail of scrollback."""
-    raw = run_tmux_cmd(["capture-pane", "-t", pane, "-p", "-S", f"-{tail}"], raise_on_error=True)
-    return any(line == end for line in raw.split('\n'))
+    raw = run_tmux_cmd(["capture-pane", "-t", pane, "-p", "-J", "-S", f"-{tail}"], raise_on_error=True)
+    return any(line == end for line in _split_capture(raw))
 
 
 def _watch_task_completion(task_id: str) -> None:
@@ -1133,13 +1137,6 @@ async def xpy_start(
 
     if not code and not codes:
         raise ValueError("Either 'code', 'codes', or 'file' must be provided")
-
-    if code and "\\n" in code:
-        raise ValueError("Code contains \\n which breaks tmux injection. Use print() for blank lines.")
-    if codes:
-        for c in codes:
-            if "\\n" in c:
-                raise ValueError("Code contains \\n which breaks tmux injection. Use print() for blank lines.")
 
     if target_panes is not None:
         results = [_start_on_pane(p, codes[i] if codes else code, "python", send_python_code) for i, p in enumerate(target_panes)]
@@ -1452,11 +1449,8 @@ async def task_wait(
     return '\n'.join(f"{tid}: {res}" for tid, res in zip(task_ids, results))
 
 
-_FINGERPRINT_SIZE = 5
-
-
 def _find_fingerprint(lines: list[str], fingerprint: list[str]) -> int | None:
-    """Find the LAST occurrence of fingerprint sequence in lines.
+    """Find the FIRST occurrence of fingerprint sequence in lines.
 
     Returns the index of the first line AFTER the fingerprint match,
     or None if not found.
@@ -1464,11 +1458,10 @@ def _find_fingerprint(lines: list[str], fingerprint: list[str]) -> int | None:
     fp_len = len(fingerprint)
     if fp_len == 0:
         return None
-    last_match = None
     for i in range(len(lines) - fp_len + 1):
         if lines[i:i + fp_len] == fingerprint:
-            last_match = i + fp_len
-    return last_match
+            return i + fp_len
+    return None
 
 
 @mcp.tool()
@@ -1476,7 +1469,6 @@ async def poll_pane(
     pane: str = None,
     pattern: str = "",
     timeout: float = 300.0,
-    tail: int = 200,
     fresh: bool = Field(True, description="ignore pre-existing content (default True)"),
     i: bool = Field(False, description="case insensitive match"),
     F: bool = Field(False, description="literal string, not regex"),
@@ -1485,10 +1477,8 @@ async def poll_pane(
     C: int = Field(None, description="context lines around match"),
 ) -> str:
     """Poll pane until pattern appears. Blocks until match or timeout.
-
-    Uses exponential backoff (0.5s → 10s cap) like task_wait.
-    With fresh=True (default), ignores pre-existing scrollback content
-    by fingerprinting the initial state.
+    fresh=True (default): only matches NEW output. Pre-existing pattern is IGNORED.
+    fresh=False: searches all content including pre-existing.
     Returns matched lines with optional context.
     """
     if pane is None:
@@ -1505,15 +1495,16 @@ async def poll_pane(
     pat = re.escape(pattern) if F else pattern
     regex = re.compile(pat, flags)
 
+    # 200 lines: enough for fingerprint uniqueness, not worth exposing as parameter
     # Capture initial fingerprint for fresh mode
     fingerprint = []
     if fresh:
         raw = run_tmux_cmd(
-            ["capture-pane", "-t", p, "-p", "-S", f"-{tail}"],
+            ["capture-pane", "-t", p, "-p", "-J", "-S", "-200"],
             raise_on_error=True,
         )
-        initial_lines = raw.rstrip().split('\n')
-        fp_size = min(_FINGERPRINT_SIZE, len(initial_lines))
+        initial_lines = _split_capture(raw)
+        fp_size = min(50, len(initial_lines))
         fingerprint = initial_lines[-fp_size:] if fp_size > 0 else []
 
     start_time = time.time()
@@ -1522,10 +1513,10 @@ async def poll_pane(
 
     while time.time() - start_time < timeout:
         raw = run_tmux_cmd(
-            ["capture-pane", "-t", p, "-p", "-S", f"-{tail}"],
+            ["capture-pane", "-t", p, "-p", "-J", "-S", "-200"],
             raise_on_error=True,
         )
-        lines = raw.rstrip().split('\n')
+        lines = _split_capture(raw)
 
         # Determine which lines to search
         if fresh and fingerprint:
@@ -1603,7 +1594,7 @@ def task_list(all: bool = False) -> str:
 
 @mcp.tool()
 def task_cancel(task_id: str) -> str:
-    """Cancel/forget a background task (does not stop execution in tmux)."""
+    """Remove task tracking. Does NOT stop the running process."""
     if task_id not in _tasks:
         raise ValueError(f"Task '{task_id}' not found")
 
@@ -1855,7 +1846,7 @@ def kill_session(name: str, force: bool = Field(False, description="force kill e
 
 @mcp.tool()
 def create_window(session: str, name: str, start_dir: str = None, cmd: str = None) -> str:
-    """Create a new window in an existing session (managed). Auto-registers pane."""
+    """Create a window in a managed session. Do NOT add windows to user's external sessions — use create_session instead."""
     if not check_session(session):
         raise ValueError(f"Session '{session}' does not exist")
 
@@ -1886,10 +1877,8 @@ def create_window(session: str, name: str, start_dir: str = None, cmd: str = Non
 
 @mcp.tool()
 def kill_window(session: str, window: str, force: bool = Field(False, description="force kill external (non-managed) window")) -> str:
-    """Kill a window in a tmux session.
-
-    Managed windows are killed immediately.
-    External windows require force=True."""
+    """Kill a window. Killing the last window destroys the session — use create_session to recreate.
+    Managed windows are killed immediately. External windows require force=True."""
     if not check_session(session):
         raise ValueError(f"Session '{session}' does not exist")
 
@@ -1965,13 +1954,13 @@ async def peek_output(pane: str, begin: str, wait: float) -> str:
     await asyncio.sleep(wait)
 
     for n_lines in [1000, 4000, 16000]:
-        raw = run_tmux_cmd(["capture-pane", "-t", pane, "-p", "-S", f"-{n_lines}"])
+        raw = run_tmux_cmd(["capture-pane", "-t", pane, "-p", "-J", "-S", f"-{n_lines}"])
         if begin in raw:
             break
     else:
-        raw = run_tmux_cmd(["capture-pane", "-t", pane, "-p", "-S", "-"])
+        raw = run_tmux_cmd(["capture-pane", "-t", pane, "-p", "-J", "-S", "-"])
 
-    lines = raw.split('\n')
+    lines = _split_capture(raw)
     capturing = False
     result = []
     for line in lines:
@@ -2173,8 +2162,8 @@ def _capture_single_pane(p: str, tail: int, rel_range: str, since_marker: str, f
         # Marker could be far back — use progressive capture
         all_lines = None
         for n_lines in [1000, 4000, 16000]:
-            raw = run_tmux_cmd(["capture-pane", "-t", p, "-p", "-S", f"-{n_lines}"])
-            lines = raw.rstrip().split('\n')
+            raw = run_tmux_cmd(["capture-pane", "-t", p, "-p", "-J", "-S", f"-{n_lines}"])
+            lines = _split_capture(raw)
             marker_idx = None
             for idx, line in enumerate(lines):
                 if since_marker in line:
@@ -2184,8 +2173,8 @@ def _capture_single_pane(p: str, tail: int, rel_range: str, since_marker: str, f
                 break
         if all_lines is None:
             # fallback: full scrollback
-            raw = run_tmux_cmd(["capture-pane", "-t", p, "-p", "-S", "-"])
-            lines = raw.rstrip().split('\n')
+            raw = run_tmux_cmd(["capture-pane", "-t", p, "-p", "-J", "-S", "-"])
+            lines = _split_capture(raw)
             marker_idx = None
             for idx, line in enumerate(lines):
                 if since_marker in line:
@@ -2197,8 +2186,8 @@ def _capture_single_pane(p: str, tail: int, rel_range: str, since_marker: str, f
         if rel_range:
             start_off, end_off = parse_rel_range(rel_range)
             n_capture = max(abs(start_off) + 50, n_capture)
-        raw = run_tmux_cmd(["capture-pane", "-t", p, "-p", "-S", f"-{n_capture}"])
-        all_lines = raw.rstrip().split('\n')
+        raw = run_tmux_cmd(["capture-pane", "-t", p, "-p", "-J", "-S", f"-{n_capture}"])
+        all_lines = _split_capture(raw)
 
     if rel_range:
         start, end = parse_rel_range(rel_range)
@@ -2213,9 +2202,9 @@ def _capture_single_pane(p: str, tail: int, rel_range: str, since_marker: str, f
 @mcp.tool()
 def capture_pane(
     pane: str = None,
-    tail: int = 5,
+    tail: int = Field(5, description="lines from end (grep searches within this)"),
     rel_range: str = Field(None, description="relative range from end, e.g. '100:50'"),
-    grep: str = None,
+    grep: str = Field(None, description="filter within tail range, does NOT expand it"),
     v: str = Field(None, description="exclude matching (grep -v)"),
     i: bool = Field(False, description="case insensitive (grep -i)"),
     w: bool = Field(False, description="whole word match (grep -w)"),
@@ -2234,7 +2223,7 @@ def capture_pane(
     suffix: str = None,
     panes: list[str] = None
 ) -> str:
-    """Capture current pane content."""
+    """Capture pane content. tail= sets capture range, grep= filters within it."""
     target_panes = _resolve_panes(pane, panes)
     fkw = dict(grep=grep, v=v, i=i, w=w, F=F, m=m, A=A, B=B, C=C, n=n,
                uniq=uniq, save=save, append=append, prefix=prefix, suffix=suffix,
@@ -2257,7 +2246,7 @@ def capture_pane(
 
 @mcp.tool()
 def task_cancel_all() -> str:
-    """Cancel all running background tasks."""
+    """Remove all task tracking. Does NOT stop running processes."""
     if not _tasks:
         return "No tasks to cancel"
 

@@ -30,7 +30,8 @@ This describes how you use tmux-injector tools. This is how the system works.
 │
 ├─ Wait for specific output to appear (no task_id)
 │   └─→ poll_pane (blocks until pattern matched or timeout)
-│       fresh=True (default): ignores pre-existing content
+│       fresh=True (default): waits for NEW output only
+│       fresh=False: also matches pre-existing (use after respawn/create)
 │
 └─ Check sessions, processes, GPU memory
     └─→ ls (compact overview), ls(session=, gpu=True) (detailed + GPU)
@@ -66,8 +67,13 @@ Without monitoring (no task_id):
 Waiting for specific output (no task_id):
     xsh_peek(pane, "make build", wait=1)
     poll_pane(pane, pattern="Build complete|ERROR", timeout=120)
-    # blocks until pattern appears, returns matched lines
-    # fresh=True (default): ignores pre-existing scrollback
+    # fresh=True (default): only matches NEW output after poll_pane is called
+    # if the pattern already exists in pane before the call, it is IGNORED
+
+After respawn/create with cmd= (process may already be ready):
+    respawn_pane(pane, cmd="python3")
+    poll_pane(pane, pattern=">>>", fresh=False)
+    # fresh=False: pattern may already exist before poll_pane is called
 
 SSH connection:
     xsh_peek(pane, "ssh user@host", wait=2)
@@ -130,9 +136,8 @@ codes/cmds length must match target count.
 5. CODE LIMITATIONS
 ==========
 
-Literal \n in code breaks tmux injection (\n becomes Enter key).
-    Forbidden: xpy(pane, "result.split('\n')")
-    Use: splitlines(), chr(10), print()
+Python (xpy/xpy_start/xpy_peek): literal \n in code is OK (base64 encoding).
+TCL (xtcl/xtcl_start/xtcl_peek): literal \n still breaks injection.
 
 All tools use exec(). Bare expressions produce no output. file= also uses exec().
     xpy(pane, "x") → empty. Use print(x).
