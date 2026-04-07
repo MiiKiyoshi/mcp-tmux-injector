@@ -30,8 +30,14 @@ This describes how you use tmux-injector tools. This is how the system works.
 │
 ├─ Wait for specific output to appear (no task_id)
 │   └─→ poll_pane (blocks until pattern matched or timeout)
-│       fresh=True (default): waits for NEW output only
-│       fresh=False: also matches pre-existing (use after respawn/create)
+│       fresh=True (default): ignores pre-existing content
+│       fresh=False: also matches pre-existing content
+│
+│       fresh rule:
+│         After respawn_pane(cmd=) / create_session(cmd=) → fresh=False
+│           cmd= starts process before poll_pane runs → output already on screen
+│         After xsh_peek / send_text → fresh=True (default)
+│           output arrives after poll_pane starts watching
 │
 └─ Check sessions, processes, GPU memory
     └─→ ls (compact overview), ls(session=, gpu=True) (detailed + GPU)
@@ -70,10 +76,11 @@ Waiting for specific output (no task_id):
     # fresh=True (default): only matches NEW output after poll_pane is called
     # if the pattern already exists in pane before the call, it is IGNORED
 
-After respawn/create with cmd= (process may already be ready):
+After respawn/create with cmd= (process starts immediately):
     respawn_pane(pane, cmd="python3")
     poll_pane(pane, pattern=">>>", fresh=False)
-    # fresh=False: pattern may already exist before poll_pane is called
+    # cmd= starts python3 before poll_pane runs → ">>>" already on screen
+    # fresh=True here would timeout (ignores the already-printed ">>>")
 
 SSH connection:
     xsh_peek(pane, "ssh user@host", wait=2)
