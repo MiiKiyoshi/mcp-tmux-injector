@@ -891,7 +891,7 @@ async def xpy(
     pane: str = None,
     code: str = None,
     codes: list[str] = None,
-    file: str = None,
+    file: str = Field(None, description="Execute a .py file via exec(). Path resolved relative to agent cwd. Use instead of code='exec(open(...).read())'"),
     timeout: float = 60.0,
     tail: int = 0,
     head: int = None,
@@ -914,6 +914,9 @@ async def xpy(
     """Execute Python code in tmux (blocking). On abort/timeout, code was already sent — do NOT resend."""
     target_panes = _resolve_panes(pane, panes)
     _validate_multi(code, codes, "codes", target_panes)
+
+    if code and "exec(open(" in code:
+        raise ValueError("Use file= instead: xpy(pane, file='path/to/script.py'). Path resolved relative to agent cwd.")
 
     if file:
         if codes:
@@ -1131,7 +1134,7 @@ async def xpy_start(
     pane: str = None,
     code: str = None,
     codes: list[str] = None,
-    file: str = None,
+    file: str = Field(None, description="Execute a .py file via exec(). Path resolved relative to agent cwd. Use instead of code='exec(open(...).read())'"),
     panes: list[str] = None,
     ctx: Context = None
 ) -> str:
@@ -1140,6 +1143,9 @@ async def xpy_start(
     Use task_status for status, task_output for output, task_wait to block."""
     target_panes = _resolve_panes(pane, panes)
     _validate_multi(code, codes, "codes", target_panes)
+
+    if code and "exec(open(" in code:
+        raise ValueError("Use file= instead: xpy_start(pane, file='path/to/script.py'). Path resolved relative to agent cwd.")
 
     if file:
         if codes:
@@ -1487,7 +1493,7 @@ async def poll_pane(
     pane: str = None,
     pattern: str = "",
     timeout: float = 300.0,
-    fresh: bool = Field(True, description="ignore pre-existing content (default True)"),
+    fresh: bool = Field(True, description="True (default): ignore pre-existing content — use after xsh_peek/send_text. False: match pre-existing — required after respawn_pane(cmd=) or create_session(cmd=)"),
     i: bool = Field(False, description="case insensitive match"),
     F: bool = Field(False, description="literal string, not regex"),
     A: int = Field(None, description="lines after match"),
