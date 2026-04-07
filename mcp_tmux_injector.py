@@ -142,6 +142,18 @@ Ask user for permission before registering with set_pane()."""
         raise ValueError(msg)
 
 
+def _check_not_python(pane: str) -> None:
+    """Raise error if pane is running a Python interpreter."""
+    try:
+        cmd = run_tmux_cmd(["display-message", "-p", "-t", pane, "#{pane_current_command}"])
+        if cmd.strip().startswith("python"):
+            raise ValueError(
+                f"Pane '{pane}' is running {cmd.strip()}. Use xpy/xpy_start/xpy_peek instead of xsh."
+            )
+    except subprocess.CalledProcessError:
+        pass
+
+
 def get_pane_lock(pane: str) -> threading.Lock:
     """Get or create a lock for a specific pane."""
     with _pane_locks_lock:
@@ -1011,9 +1023,12 @@ async def xsh(
     fkw = dict(grep=grep, v=v, i=i, w=w, F=F, m=m, A=A, B=B, C=C, n=n, uniq=uniq, strip_tqdm=strip_tqdm)
 
     if target_panes is not None:
+        for p in target_panes:
+            _check_not_python(p)
         return await _blocking_multi(target_panes, code, send_shell_code, timeout, fkw, tail=tail, head=head, force=force, codes=codes)
 
     check_pane_registered(pane)
+    _check_not_python(pane)
     if not check_session(pane):
         raise ValueError(f"Pane '{pane}' not found in tmux")
     return await _blocking_on_pane(pane, code, send_shell_code, timeout, fkw, tail=tail, head=head, force=force)
@@ -1207,10 +1222,13 @@ async def xsh_start(
         raise ValueError("Either 'code', 'codes', or 'file' must be provided")
 
     if target_panes is not None:
+        for p in target_panes:
+            _check_not_python(p)
         results = [_start_on_pane(p, codes[i] if codes else code, "shell", send_shell_code) for i, p in enumerate(target_panes)]
         return '\n'.join(results)
 
     check_pane_registered(pane)
+    _check_not_python(pane)
     lock = acquire_pane_lock(pane)
     task_id, begin, end = generate_task_id_and_marker()
     send_shell_code(pane, code, begin, end)
@@ -2089,9 +2107,12 @@ async def xsh_peek(
     target_panes = _resolve_panes(pane, panes)
     _validate_multi(code, codes, "codes", target_panes)
     if target_panes is not None:
+        for p in target_panes:
+            _check_not_python(p)
         return await _peek_multi(target_panes, code, wait, _peek_on_pane_sh, codes=codes)
 
     check_pane_registered(pane)
+    _check_not_python(pane)
     if not check_session(pane):
         raise ValueError(f"Pane '{pane}' not found in tmux")
     return await _peek_on_pane_sh(pane, code, wait)
