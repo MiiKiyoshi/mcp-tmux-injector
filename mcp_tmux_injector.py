@@ -915,9 +915,6 @@ async def xpy(
     target_panes = _resolve_panes(pane, panes)
     _validate_multi(code, codes, "codes", target_panes)
 
-    if code and "exec(open(" in code:
-        raise ValueError("Use file= instead: xpy(pane, file='path/to/script.py'). Path resolved relative to agent cwd.")
-
     if file:
         if codes:
             raise ValueError("Use 'file' or 'codes', not both")
@@ -1143,9 +1140,6 @@ async def xpy_start(
     Use task_status for status, task_output for output, task_wait to block."""
     target_panes = _resolve_panes(pane, panes)
     _validate_multi(code, codes, "codes", target_panes)
-
-    if code and "exec(open(" in code:
-        raise ValueError("Use file= instead: xpy_start(pane, file='path/to/script.py'). Path resolved relative to agent cwd.")
 
     if file:
         if codes:
