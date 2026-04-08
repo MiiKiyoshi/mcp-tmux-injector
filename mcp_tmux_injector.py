@@ -847,7 +847,11 @@ async def _blocking_on_pane(p: str, code: str, send_fn, timeout: float, filter_k
             )
 
         return filtered
-    except (TimeoutError, asyncio.CancelledError) as exc:
+    except TimeoutError:
+        lock.release()
+        converted = True
+        return f"[timeout] Command was sent but end marker not received within {timeout}s. Process may still be running in tmux. Use xsh_start for long-running commands."
+    except asyncio.CancelledError:
         _tasks[task_id] = {
             "pane": p, "begin": begin, "end": end,
             "start_time": start_time, "type": task_type,
@@ -855,15 +859,7 @@ async def _blocking_on_pane(p: str, code: str, send_fn, timeout: float, filter_k
         }
         converted = True
         threading.Thread(target=_watch_task_completion, args=(task_id,), daemon=True).start()
-        if isinstance(exc, asyncio.CancelledError):
-            raise
-        try:
-            partial, _ = check_task_output(p, begin, end)
-            n_lines = len(partial.split('\n')) if partial else 0
-            progress = f" (output: {n_lines} lines so far)" if n_lines > 0 else ""
-        except Exception:
-            progress = ""
-        return f"[timeout → task] {task_id}{progress}"
+        raise
     finally:
         if not converted:
             lock.release()

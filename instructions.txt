@@ -204,8 +204,12 @@ When task_id exists (from xpy_start/xsh_start/xtcl_start), use task_wait.
 Abort/timeout means "end marker not received", not "command not sent".
 The command was already sent to tmux. Do not resend.
 
-Blocking tools auto-convert to background task on timeout or cancellation.
-After abort/timeout: task_list() to find the converted task, then task_wait/task_output.
+Timeout behavior:
+    Blocking tools (xsh/xpy/xtcl) return [timeout] on timeout — no task created.
+    Process may still be running in tmux. Use xsh_start next time for long-running commands.
+
+User cancellation (CancelledError) auto-converts to background task.
+After cancellation: task_list() to find the converted task, then task_wait/task_output.
 
 Exit commands produce no end marker. Use peek for exit:
     xtcl_peek(pane, "exit", wait=1)
