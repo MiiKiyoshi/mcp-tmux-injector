@@ -52,6 +52,8 @@ _TQDM_INDICATOR = re.compile(r'\d+%\|')
 _TQDM_FRAC = re.compile(r'\|\s*\d+/\d+')
 _TQDM_SPEED = re.compile(r'(?:it|s)/(?:s|it)[\]\s]')
 _TQDM_BLOCK_ONLY = re.compile(r'^[\s█▏▎▍▌▋▊▉]+$')
+# Line is a tqdm progress bar — changes every iteration, useless as fingerprint anchor
+_TQDM_PROGRESS_LINE = re.compile(r'\d+%\||\d+:\d+<\d+:\d+|(?:it|s)/(?:s|it)')
 
 _INSTRUCTIONS_FILE = Path(__file__).parent / "instructions.txt"
 INSTRUCTIONS = _INSTRUCTIONS_FILE.read_text() if _INSTRUCTIONS_FILE.exists() else ""
@@ -1510,14 +1512,18 @@ async def poll_pane(
     # 200 lines: enough for fingerprint uniqueness, not worth exposing as parameter
     # Capture initial fingerprint for fresh mode
     fingerprint = []
+    fingerprint_total = 0
     if fresh:
         raw = run_tmux_cmd(
             ["capture-pane", "-t", p, "-p", "-J", "-S", "-200"],
             raise_on_error=True,
         )
         initial_lines = _split_capture(raw)
-        fp_size = min(50, len(initial_lines))
-        fingerprint = initial_lines[-fp_size:] if fp_size > 0 else []
+        fingerprint_total = len(initial_lines)
+        # Exclude progress bar lines: they change every iteration and break exact matching
+        stable = [l for l in initial_lines if not _TQDM_PROGRESS_LINE.search(l)]
+        fp_size = min(50, len(stable))
+        fingerprint = stable[-fp_size:] if fp_size > 0 else []
 
     start_time = time.time()
     interval = 0.5
@@ -1531,13 +1537,30 @@ async def poll_pane(
         lines = _split_capture(raw)
 
         # Determine which lines to search
-        if fresh and fingerprint:
-            fp_end = _find_fingerprint(lines, fingerprint)
-            if fp_end is not None:
-                search_lines = lines[fp_end:]
+        if fresh:
+            if fingerprint:
+                stable_lines = [l for l in lines if not _TQDM_PROGRESS_LINE.search(l)]
+                fp_end_stable = _find_fingerprint(stable_lines, fingerprint)
+                if fp_end_stable is not None:
+                    # Map stable index back to position in original lines
+                    count = 0
+                    cutoff = len(lines)
+                    for i, line in enumerate(lines):
+                        if not _TQDM_PROGRESS_LINE.search(line):
+                            count += 1
+                            if count == fp_end_stable:
+                                cutoff = i + 1
+                                break
+                    search_lines = lines[cutoff:]
+                elif len(lines) >= fingerprint_total + 50:
+                    # Fingerprint truly scrolled out (50+ new lines) — all is new
+                    search_lines = lines
+                else:
+                    # Progress bars changed fingerprint but little new output — wait
+                    search_lines = []
             else:
-                # Fingerprint scrolled out — all captured content is new
-                search_lines = lines
+                # No stable fingerprint lines (all were progress bars) — use line count
+                search_lines = lines[fingerprint_total:] if len(lines) > fingerprint_total else []
         else:
             search_lines = lines
 
