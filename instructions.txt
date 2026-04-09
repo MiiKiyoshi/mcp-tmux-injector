@@ -6,7 +6,7 @@ This describes how you use tmux-injector tools. This is how the system works.
 
 ┌─ Start interpreter (python3, openroad, etc.)
 │   └─→ xsh_peek / xpy_peek / xtcl_peek
-│       (no end marker, wait=1~2 seconds)
+│       wait=1~2 seconds — OR — poll="prompt_pattern" to wait for a specific prompt
 │
 ├─ Run short command (wait for completion)
 │   └─→ xsh / xpy / xtcl (blocking)
@@ -83,11 +83,9 @@ After respawn/create with cmd= (process starts immediately):
     # fresh=True here would timeout (ignores the already-printed ">>>")
 
 SSH connection:
-    xsh_peek(pane, "ssh user@host", wait=2)
-    send_text(pane, "password")
-    capture_pane(pane)
+    xsh_peek(pane, "ssh user@host", poll="\\$", poll_timeout=15)  # wait for shell prompt
+    send_text(pane, "password")          # if password required
     xsh(pane, "hostname")
-    xsh_peek(pane, "exit", wait=1)
 
 Passing variables from REPL to script (globals trick):
     xpy(pane, "model_path = '/path/to/model'")

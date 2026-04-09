@@ -1478,6 +1478,70 @@ def _find_fingerprint(lines: list[str], fingerprint: list[str]) -> int | None:
     return None
 
 
+def _build_fingerprint(p: str) -> tuple[list[str], int]:
+    """Snapshot current pane state for fresh-mode polling.
+
+    Returns (fingerprint_lines, total_line_count).
+    fingerprint_lines: last ≤50 stable (non-progress-bar) lines.
+    """
+    raw = run_tmux_cmd(["capture-pane", "-t", p, "-p", "-J", "-S", "-200"], raise_on_error=True)
+    initial_lines = _split_capture(raw)
+    stable = [l for l in initial_lines if not _TQDM_PROGRESS_LINE.search(l)]
+    fp_size = min(50, len(stable))
+    return stable[-fp_size:] if fp_size > 0 else [], len(initial_lines)
+
+
+def _get_fresh_lines(lines: list[str], fingerprint: list[str], fingerprint_total: int) -> list[str]:
+    """Return lines that appeared after the fingerprint snapshot.
+
+    - Fingerprint found: lines after it.
+    - Fingerprint scrolled out (50+ new lines): all lines (old content gone too).
+    - Fingerprint changed by progress bars: empty list (wait more).
+    """
+    if fingerprint:
+        stable_lines = [l for l in lines if not _TQDM_PROGRESS_LINE.search(l)]
+        fp_end_stable = _find_fingerprint(stable_lines, fingerprint)
+        if fp_end_stable is not None:
+            count = 0
+            cutoff = len(lines)
+            for i, line in enumerate(lines):
+                if not _TQDM_PROGRESS_LINE.search(line):
+                    count += 1
+                    if count == fp_end_stable:
+                        cutoff = i + 1
+                        break
+            return lines[cutoff:]
+        elif len(lines) >= fingerprint_total + 50:
+            return lines
+        else:
+            return []
+    else:
+        return lines[fingerprint_total:] if len(lines) > fingerprint_total else []
+
+
+async def _poll_for_pattern(p: str, pattern: str, timeout: float) -> str:
+    """Poll pane for pattern in new output (always fresh=True).
+
+    Returns all new lines visible when the pattern first appears.
+    Raises TimeoutError if pattern not found within timeout seconds.
+    """
+    fingerprint, fingerprint_total = _build_fingerprint(p)
+    regex = re.compile(pattern)
+    start = time.time()
+    interval = 0.5
+
+    while time.time() - start < timeout:
+        raw = run_tmux_cmd(["capture-pane", "-t", p, "-p", "-J", "-S", "-200"], raise_on_error=True)
+        lines = _split_capture(raw)
+        search_lines = _get_fresh_lines(lines, fingerprint, fingerprint_total)
+        if any(regex.search(l) for l in search_lines):
+            return '\n'.join(search_lines)
+        await asyncio.sleep(interval)
+        interval = min(interval * 2, 10.0)
+
+    raise TimeoutError(f"Pattern '{pattern}' not found in pane '{p}' within {timeout}s")
+
+
 @mcp.tool()
 async def poll_pane(
     pane: str = None,
@@ -1509,21 +1573,7 @@ async def poll_pane(
     pat = re.escape(pattern) if F else pattern
     regex = re.compile(pat, flags)
 
-    # 200 lines: enough for fingerprint uniqueness, not worth exposing as parameter
-    # Capture initial fingerprint for fresh mode
-    fingerprint = []
-    fingerprint_total = 0
-    if fresh:
-        raw = run_tmux_cmd(
-            ["capture-pane", "-t", p, "-p", "-J", "-S", "-200"],
-            raise_on_error=True,
-        )
-        initial_lines = _split_capture(raw)
-        fingerprint_total = len(initial_lines)
-        # Exclude progress bar lines: they change every iteration and break exact matching
-        stable = [l for l in initial_lines if not _TQDM_PROGRESS_LINE.search(l)]
-        fp_size = min(50, len(stable))
-        fingerprint = stable[-fp_size:] if fp_size > 0 else []
+    fingerprint, fingerprint_total = _build_fingerprint(p) if fresh else ([], 0)
 
     start_time = time.time()
     interval = 0.5
@@ -1535,34 +1585,7 @@ async def poll_pane(
             raise_on_error=True,
         )
         lines = _split_capture(raw)
-
-        # Determine which lines to search
-        if fresh:
-            if fingerprint:
-                stable_lines = [l for l in lines if not _TQDM_PROGRESS_LINE.search(l)]
-                fp_end_stable = _find_fingerprint(stable_lines, fingerprint)
-                if fp_end_stable is not None:
-                    # Map stable index back to position in original lines
-                    count = 0
-                    cutoff = len(lines)
-                    for i, line in enumerate(lines):
-                        if not _TQDM_PROGRESS_LINE.search(line):
-                            count += 1
-                            if count == fp_end_stable:
-                                cutoff = i + 1
-                                break
-                    search_lines = lines[cutoff:]
-                elif len(lines) >= fingerprint_total + 50:
-                    # Fingerprint truly scrolled out (50+ new lines) — all is new
-                    search_lines = lines
-                else:
-                    # Progress bars changed fingerprint but little new output — wait
-                    search_lines = []
-            else:
-                # No stable fingerprint lines (all were progress bars) — use line count
-                search_lines = lines[fingerprint_total:] if len(lines) > fingerprint_total else []
-        else:
-            search_lines = lines
+        search_lines = _get_fresh_lines(lines, fingerprint, fingerprint_total) if fresh else lines
 
         matched_indices = [idx for idx, line in enumerate(search_lines) if regex.search(line)]
         if matched_indices:
@@ -2008,9 +2031,10 @@ async def peek_output(pane: str, begin: str, wait: float) -> str:
     return '\n'.join(result).rstrip()
 
 
-async def _peek_on_pane_py(p: str, code: str, wait: float) -> str:
+async def _peek_on_pane_py(p: str, code: str, wait: float, poll: str = None, poll_timeout: float = 30.0) -> str:
     """Peek helper for Python on a single pane."""
     lock = acquire_pane_lock(p)
+    lock_held = True
     try:
         begin, _ = generate_marker()
         run_tmux_cmd(["send-keys", "-t", p, "-X", "cancel"], capture=False)
@@ -2019,14 +2043,20 @@ async def _peek_on_pane_py(p: str, code: str, wait: float) -> str:
         for line in code.split('\n'):
             run_tmux_cmd(["send-keys", "-t", p, line], capture=False)
             run_tmux_cmd(["send-keys", "-t", p, "Enter"], capture=False)
+        if poll:
+            lock.release()
+            lock_held = False
+            return await _poll_for_pattern(p, poll, poll_timeout)
         return await peek_output(p, begin, wait)
     finally:
-        lock.release()
+        if lock_held:
+            lock.release()
 
 
-async def _peek_on_pane_tcl(p: str, code: str, wait: float) -> str:
+async def _peek_on_pane_tcl(p: str, code: str, wait: float, poll: str = None, poll_timeout: float = 30.0) -> str:
     """Peek helper for TCL on a single pane."""
     lock = acquire_pane_lock(p)
+    lock_held = True
     try:
         begin, _ = generate_marker()
         run_tmux_cmd(["send-keys", "-t", p, "-X", "cancel"], capture=False)
@@ -2034,14 +2064,20 @@ async def _peek_on_pane_tcl(p: str, code: str, wait: float) -> str:
         run_tmux_cmd(["send-keys", "-t", p, "Enter"], capture=False)
         run_tmux_cmd(["send-keys", "-t", p, code], capture=False)
         run_tmux_cmd(["send-keys", "-t", p, "Enter"], capture=False)
+        if poll:
+            lock.release()
+            lock_held = False
+            return await _poll_for_pattern(p, poll, poll_timeout)
         return await peek_output(p, begin, wait)
     finally:
-        lock.release()
+        if lock_held:
+            lock.release()
 
 
-async def _peek_on_pane_sh(p: str, code: str, wait: float) -> str:
+async def _peek_on_pane_sh(p: str, code: str, wait: float, poll: str = None, poll_timeout: float = 30.0) -> str:
     """Peek helper for shell on a single pane."""
     lock = acquire_pane_lock(p)
+    lock_held = True
     try:
         begin, _ = generate_marker()
         run_tmux_cmd(["send-keys", "-t", p, "-X", "cancel"], capture=False)
@@ -2050,12 +2086,17 @@ async def _peek_on_pane_sh(p: str, code: str, wait: float) -> str:
         for line in code.split('\n'):
             run_tmux_cmd(["send-keys", "-t", p, line], capture=False)
             run_tmux_cmd(["send-keys", "-t", p, "Enter"], capture=False)
+        if poll:
+            lock.release()
+            lock_held = False
+            return await _poll_for_pattern(p, poll, poll_timeout)
         return await peek_output(p, begin, wait)
     finally:
-        lock.release()
+        if lock_held:
+            lock.release()
 
 
-async def _peek_multi(target_panes: list[str], code: str, wait: float, peek_fn, codes: list[str] = None) -> str:
+async def _peek_multi(target_panes: list[str], code: str, wait: float, peek_fn, codes: list[str] = None, poll: str = None, poll_timeout: float = 30.0) -> str:
     """Run peek on multiple panes concurrently and return grouped result."""
     results = {}
     coros = {}
@@ -2064,7 +2105,7 @@ async def _peek_multi(target_panes: list[str], code: str, wait: float, peek_fn, 
             results[p] = "not found (skipped)"
         else:
             c = codes[i] if codes else code
-            coros[p] = peek_fn(p, c, wait)
+            coros[p] = peek_fn(p, c, wait, poll, poll_timeout)
     if coros:
         results_list = await asyncio.gather(*coros.values(), return_exceptions=True)
         for p, result in zip(coros.keys(), results_list):
@@ -2078,18 +2119,20 @@ async def xpy_peek(
     code: str = "",
     codes: list[str] = None,
     wait: float = 1.0,
-    panes: list[str] = None
+    panes: list[str] = None,
+    poll: str = Field(None, description="If set, wait until this regex appears in new output instead of using fixed wait"),
+    poll_timeout: float = Field(30.0, description="Max seconds to wait for poll pattern"),
 ) -> str:
     """Execute Python code and capture output for a short time (no end marker wait)."""
     target_panes = _resolve_panes(pane, panes)
     _validate_multi(code, codes, "codes", target_panes)
     if target_panes is not None:
-        return await _peek_multi(target_panes, code, wait, _peek_on_pane_py, codes=codes)
+        return await _peek_multi(target_panes, code, wait, _peek_on_pane_py, codes=codes, poll=poll, poll_timeout=poll_timeout)
 
     check_pane_registered(pane)
     if not check_session(pane):
         raise ValueError(f"Pane '{pane}' not found in tmux")
-    return await _peek_on_pane_py(pane, code, wait)
+    return await _peek_on_pane_py(pane, code, wait, poll=poll, poll_timeout=poll_timeout)
 
 
 @mcp.tool()
@@ -2098,18 +2141,20 @@ async def xtcl_peek(
     code: str = "",
     codes: list[str] = None,
     wait: float = 1.0,
-    panes: list[str] = None
+    panes: list[str] = None,
+    poll: str = Field(None, description="If set, wait until this regex appears in new output instead of using fixed wait"),
+    poll_timeout: float = Field(30.0, description="Max seconds to wait for poll pattern"),
 ) -> str:
     """Execute TCL code and capture output for a short time (no end marker wait)."""
     target_panes = _resolve_panes(pane, panes)
     _validate_multi(code, codes, "codes", target_panes)
     if target_panes is not None:
-        return await _peek_multi(target_panes, code, wait, _peek_on_pane_tcl, codes=codes)
+        return await _peek_multi(target_panes, code, wait, _peek_on_pane_tcl, codes=codes, poll=poll, poll_timeout=poll_timeout)
 
     check_pane_registered(pane)
     if not check_session(pane):
         raise ValueError(f"Pane '{pane}' not found in tmux")
-    return await _peek_on_pane_tcl(pane, code, wait)
+    return await _peek_on_pane_tcl(pane, code, wait, poll=poll, poll_timeout=poll_timeout)
 
 
 @mcp.tool()
@@ -2118,7 +2163,9 @@ async def xsh_peek(
     code: str = "",
     codes: list[str] = None,
     wait: float = 1.0,
-    panes: list[str] = None
+    panes: list[str] = None,
+    poll: str = Field(None, description="If set, wait until this regex appears in new output instead of using fixed wait"),
+    poll_timeout: float = Field(30.0, description="Max seconds to wait for poll pattern"),
 ) -> str:
     """Execute shell command and capture output for a short time (no end marker wait)."""
     target_panes = _resolve_panes(pane, panes)
@@ -2126,13 +2173,13 @@ async def xsh_peek(
     if target_panes is not None:
         for p in target_panes:
             _check_not_python(p)
-        return await _peek_multi(target_panes, code, wait, _peek_on_pane_sh, codes=codes)
+        return await _peek_multi(target_panes, code, wait, _peek_on_pane_sh, codes=codes, poll=poll, poll_timeout=poll_timeout)
 
     check_pane_registered(pane)
     _check_not_python(pane)
     if not check_session(pane):
         raise ValueError(f"Pane '{pane}' not found in tmux")
-    return await _peek_on_pane_sh(pane, code, wait)
+    return await _peek_on_pane_sh(pane, code, wait, poll=poll, poll_timeout=poll_timeout)
 
 
 @mcp.tool()
