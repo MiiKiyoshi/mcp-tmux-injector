@@ -68,10 +68,10 @@ set_pane("mysession:main.0", "description")
 create_session("work", windows=["train", "eval"])
 ```
 
-**Running code in a Python REPL**
+**Run a script in the background and get notified on completion**
 
 ```
-"train.py를 백그라운드로 실행하고 끝나면 알려줘"
+"Run train.py in the background and let me know when it's done"
 ```
 
 The agent uses `xsh_peek` to start Python, `xpy_start` to launch the script, and `task_wait` to notify on completion.
@@ -79,15 +79,15 @@ The agent uses `xsh_peek` to start Python, `xpy_start` to launch the script, and
 **Parallel work across windows**
 
 ```
-"work 세션 각 윈도우에서 서로 다른 config로 학습 돌려줘"
+"Run training in each window of the work session with different configs"
 ```
 
 The agent dispatches to multiple panes simultaneously using `panes=` + `codes=`.
 
-**Monitoring a long-running process**
+**Monitor session status**
 
 ```
-"현재 각 pane 상태 확인해줘"
+"Check the current status of each pane in the work session"
 ```
 
 `ls(session="work", gpu=True)` shows PID, process, cwd, and GPU memory per pane.
