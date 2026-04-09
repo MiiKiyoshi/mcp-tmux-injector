@@ -192,10 +192,10 @@ def acquire_pane_lock(pane: str) -> threading.Lock:
 
 
 def _wrap_cmd(cmd: str) -> str:
-    """Wrap cmd in bash so pane survives process exit/crash."""
+    """Wrap cmd in bash so pane survives process exit/crash. -i loads ~/.bashrc aliases."""
     # Strip any .venv from PATH so pane gets clean environment
     clean_path = 'unset VIRTUAL_ENV; PATH=$(echo "$PATH" | tr ":" "\\n" | grep -v "/.venv/" | tr "\\n" ":"); '
-    return f"bash -c {shlex.quote(clean_path + '{ . ~/.bashrc; } 2>/dev/null; ' + cmd + '; exec bash')}"
+    return f"bash -ic {shlex.quote(clean_path + cmd + '; exec bash -i')}"
 
 
 def run_tmux_cmd(args: list[str], capture: bool = True, raise_on_error: bool = False) -> str:
