@@ -252,6 +252,4 @@ New workspaces → create_session(). Existing external panes → set_pane() to r
 Temporary work (one-off ssh, sync, file transfer, etc.):
     create_session("tmp") → work → kill_session("tmp")
 
-    Fallback rule: if create_window fails (e.g. external session) →
-        use create_session, NOT existing user panes.
     Existing user panes are never borrowed for temporary work.
