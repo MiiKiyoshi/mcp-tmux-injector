@@ -66,10 +66,6 @@ Waiting for long-running tasks:
     # capture_pane polling loop is an anti-pattern when task_id exists.
     # task_wait with timeout replaces repeated capture_pane calls.
 
-Without monitoring (no task_id):
-    xsh_peek(pane, "python3 train.py", wait=2)
-    capture_pane(pane, tail=30)
-
 Waiting for specific output (no task_id):
     xsh_peek(pane, "make build", wait=1)
     poll_pane(pane, pattern="Build complete|ERROR", timeout=120)
@@ -91,11 +87,6 @@ Passing variables from REPL to script (globals trick):
     xpy(pane, "model_path = '/path/to/model'")
     xpy_start(pane, file="train.py")       # script accesses via globals().get('model_path', None)
     # file= uses exec() which shares REPL's globals()
-
-Checking session/pane status:
-    ls()                              # compact: session names + window counts
-    ls(session="exp")                 # detailed: PID, process, cwd per pane
-    ls(session="exp", gpu=True)       # adds GPU device + memory
 
 Setting up parallel workspaces:
     create_session("exp", windows=["a", "b", "c"], cmd="python3")
@@ -129,10 +120,6 @@ Different code per pane:
     xpy(panes=["t1:a.0", "t1:b.0"], codes=["x=1; print(x)", "x=2; print(x)"])
 
 Works with all 9 tools: xpy/xtcl/xsh, xpy_start/xtcl_start/xsh_start, xpy_peek/xtcl_peek/xsh_peek.
-
-respawn_pane also supports panes= + cmd/cmds:
-    respawn_pane(panes=["t1:a.0", "t1:b.0"], cmd="python3")
-    respawn_pane(panes=["t1:a.0", "t1:b.0"], cmds=["python3", "bash"])
 
 code and codes are mutually exclusive. cmd and cmds are mutually exclusive.
 codes/cmds length must match target count.
@@ -228,12 +215,6 @@ Registered panes persist in MCP server memory across conversation compaction.
 After compaction: ls() to check what is registered.
 New session or server restart: ask user which pane to use.
 
-Task tracking lost on MCP server restart:
-    xpy_start/xsh_start/xtcl_start task_ids are gone, but processes are still running.
-    task_wait/task_output will report "No task found".
-    Recovery: re-issue xpy_start/xsh_start/xtcl_start with a marker command.
-    tmux send-keys writes to the pane's pty buffer. If the process is busy,
-    the marker queues in stdin and executes when the current job finishes.
 
 ==========
 10. OWNERSHIP MODEL
