@@ -1563,6 +1563,7 @@ async def _poll_for_pattern(p: str, pattern: str, timeout: float) -> str:
 @mcp.tool()
 async def poll_pane(
     pane: str = None,
+    panes: list[str] = None,
     pattern: str = "",
     timeout: float = 300.0,
     fresh: bool = Field(True, description="True (default): ignore pre-existing content — use after xsh_peek/send_text. False: match pre-existing — required after respawn_pane(cmd=) or create_session(cmd=)"),
@@ -1576,56 +1577,73 @@ async def poll_pane(
     fresh=True (default): only matches NEW output. Pre-existing pattern is IGNORED.
     fresh=False: searches all content including pre-existing.
     Returns matched lines with optional context.
+    pane: single pane or list of panes. With multiple panes, returns as soon as ANY matches.
     """
-    if pane is None:
-        raise ValueError("pane is required")
-    check_pane_registered(pane)
-    if not check_session(pane):
-        raise ValueError(f"Pane '{pane}' not found in tmux")
-    p = pane
-
     if not pattern:
         raise ValueError("pattern is required")
+
+    target_panes = _resolve_panes(pane, panes)
+    if target_panes is None:
+        if pane is None:
+            raise ValueError("pane is required")
+        check_pane_registered(pane)
+        if not check_session(pane):
+            raise ValueError(f"Pane '{pane}' not found in tmux")
+        target_panes = [pane]
+    else:
+        for p in target_panes:
+            if not check_session(p):
+                raise ValueError(f"Pane '{p}' not found in tmux")
 
     flags = re.IGNORECASE if i else 0
     pat = re.escape(pattern) if F else pattern
     regex = re.compile(pat, flags)
+    before = B if B is not None else (C or 0)
+    after = A if A is not None else (C or 0)
 
-    fingerprint, fingerprint_total = _build_fingerprint(p) if fresh else ([], 0)
+    async def _poll_one(p: str) -> str:
+        fingerprint, fingerprint_total = _build_fingerprint(p) if fresh else ([], 0)
+        start_time = time.time()
+        interval = 0.5
+        max_interval = 10.0
 
-    start_time = time.time()
-    interval = 0.5
-    max_interval = 10.0
+        while time.time() - start_time < timeout:
+            raw = run_tmux_cmd(
+                ["capture-pane", "-t", p, "-p", "-J", "-S", "-200"],
+                raise_on_error=True,
+            )
+            lines = _split_capture(raw)
+            search_lines = _get_fresh_lines(lines, fingerprint, fingerprint_total) if fresh else lines
 
-    while time.time() - start_time < timeout:
-        raw = run_tmux_cmd(
-            ["capture-pane", "-t", p, "-p", "-J", "-S", "-200"],
-            raise_on_error=True,
-        )
-        lines = _split_capture(raw)
-        search_lines = _get_fresh_lines(lines, fingerprint, fingerprint_total) if fresh else lines
+            matched_indices = [idx for idx, line in enumerate(search_lines) if regex.search(line)]
+            if matched_indices:
+                result_lines = []
+                included = set()
+                for idx in matched_indices:
+                    lo = max(0, idx - before)
+                    hi = min(len(search_lines), idx + after + 1)
+                    for j in range(lo, hi):
+                        if j not in included:
+                            included.add(j)
+                            result_lines.append(search_lines[j])
+                elapsed = time.time() - start_time
+                header = f"[matched] pane={p} {len(matched_indices)} hit(s) after {elapsed:.1f}s"
+                return header + '\n' + '\n'.join(result_lines)
 
-        matched_indices = [idx for idx, line in enumerate(search_lines) if regex.search(line)]
-        if matched_indices:
-            before = B if B is not None else (C or 0)
-            after = A if A is not None else (C or 0)
-            result_lines = []
-            included = set()
-            for idx in matched_indices:
-                lo = max(0, idx - before)
-                hi = min(len(search_lines), idx + after + 1)
-                for j in range(lo, hi):
-                    if j not in included:
-                        included.add(j)
-                        result_lines.append(search_lines[j])
-            elapsed = time.time() - start_time
-            header = f"[matched] {len(matched_indices)} hit(s) after {elapsed:.1f}s"
-            return header + '\n' + '\n'.join(result_lines)
+            await asyncio.sleep(interval)
+            interval = min(interval * 2, max_interval)
 
-        await asyncio.sleep(interval)
-        interval = min(interval * 2, max_interval)
+        raise TimeoutError(f"Pattern '{pattern}' not found in pane '{p}' within {timeout}s")
 
-    raise TimeoutError(f"Pattern '{pattern}' not found in pane '{p}' within {timeout}s")
+    if len(target_panes) == 1:
+        return await _poll_one(target_panes[0])
+
+    tasks = {asyncio.create_task(_poll_one(p)): p for p in target_panes}
+    done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    for t in pending:
+        t.cancel()
+    winner = done.pop()
+    return winner.result()
 
 
 @mcp.tool()
