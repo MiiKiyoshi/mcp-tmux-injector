@@ -533,7 +533,7 @@ def apply_output_filters(
 
     # Apply grep filter with context (A/B/C)
     if grep:
-        pat = re.escape(grep) if F else grep
+        pat = re.escape(grep) if F else grep.replace(r'\|', '|')
         pat = rf'\b{pat}\b' if w else pat
         pattern = re.compile(pat, flags)
         before = B if B is not None else (C or 0)
