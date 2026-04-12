@@ -692,6 +692,24 @@ def _list_windows(session: str) -> list[str]:
     return [w.strip() for w in result.stdout.strip().split('\n') if w.strip()]
 
 
+def _resolve_window(session: str, window: str) -> str:
+    """Resolve window identifier (name or index) to window name.
+    Returns the window name, or raises ValueError if not found."""
+    names = _list_windows(session)
+    if window in names:
+        return window
+    result = subprocess.run(
+        ["tmux", "list-windows", "-t", f"={session}", "-F", "#{window_index}|#{window_name}"],
+        capture_output=True, text=True
+    )
+    if result.returncode == 0:
+        for line in result.stdout.strip().split('\n'):
+            idx, name = line.strip().split('|', 1)
+            if idx == window:
+                return name
+    raise ValueError(f"Window '{window}' not found in session '{session}'")
+
+
 def _find_active_task_on_pane(pane: str) -> tuple[str, dict] | None:
     """Find task on a pane. Running task takes priority, then most recent completed."""
     latest = None
@@ -1940,17 +1958,15 @@ def kill_window(session: str, window: str, force: bool = Field(False, descriptio
     if not check_session(session):
         raise ValueError(f"Session '{session}' does not exist")
 
-    existing = _list_windows(session)
-    if window not in existing:
-        raise ValueError(f"Window '{window}' not found in session '{session}'")
+    window_name = _resolve_window(session, window)
 
-    owner = _sessions.get(session, {}).get("windows", {}).get(window, {}).get("owner", EXTERNAL)
-    _check_ownership("Window", f"{session}:{window}", owner, force)
+    owner = _sessions.get(session, {}).get("windows", {}).get(window_name, {}).get("owner", EXTERNAL)
+    _check_ownership("Window", f"{session}:{window_name}", owner, force)
 
-    _cleanup_window_resources(session, window)
-    subprocess.run(["tmux", "kill-window", "-t", f"={session}:{window}"], capture_output=True)
+    _cleanup_window_resources(session, window_name)
+    subprocess.run(["tmux", "kill-window", "-t", f"={session}:{window_name}"], capture_output=True)
 
-    return f"Killed window '{window}' in session '{session}'"
+    return f"Killed window '{window_name}' in session '{session}'"
 
 
 @mcp.tool()
