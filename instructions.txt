@@ -160,10 +160,6 @@ tail= defines the visible window. grep= searches within that window.
 grep does NOT expand the capture range. To search deeper scrollback, increase tail:
     capture_pane(pane, tail=4000, grep="FATAL")    # search last 4000 lines
 
-grep= is Python regex (re module), not BRE. OR is |, not \|.
-    grep="Fold|Run|Device"      # correct
-    grep="Fold\\|Run\\|Device"  # wrong — matches literal | character
-
 ==========
 7. STATE TRACKING
 ==========
