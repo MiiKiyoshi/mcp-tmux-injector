@@ -39,7 +39,9 @@ import time
 import random
 import os
 import re
+import json
 import shlex
+import fnmatch
 import threading
 import asyncio
 from mcp.server.fastmcp import FastMCP, Context
@@ -57,6 +59,32 @@ _TQDM_PROGRESS_LINE = re.compile(r'\d+%\||\d+:\d+<\d+:\d+|(?:it|s)/(?:s|it)')
 
 _INSTRUCTIONS_FILE = Path(__file__).parent / "instructions.txt"
 INSTRUCTIONS = _INSTRUCTIONS_FILE.read_text() if _INSTRUCTIONS_FILE.exists() else ""
+
+# Deny-list config: ~/.config/mcp-tmux-injector/config.json
+_CONFIG_PATH = Path.home() / ".config" / "mcp-tmux-injector" / "config.json"
+_deny_rules: dict[str, list[str]] = {}  # {"shell": [...], "python": [...], "tcl": [...], "send_text": [...]}
+
+def _load_config():
+    global _deny_rules
+    if _CONFIG_PATH.exists():
+        cfg = json.loads(_CONFIG_PATH.read_text())
+        _deny_rules = cfg.get("deny", {})
+
+_load_config()
+
+
+class DenyError(Exception):
+    pass
+
+
+def check_deny(code: str, category: str) -> None:
+    """Check code against deny patterns. Raises DenyError if matched."""
+    patterns = _deny_rules.get(category, [])
+    for pattern in patterns:
+        for line in code.split('\n'):
+            if fnmatch.fnmatch(line.strip(), pattern):
+                raise DenyError(f"Blocked by deny rule: '{pattern}' matched '{line.strip()}'")
+
 
 mcp = FastMCP("tmux-injector", instructions=INSTRUCTIONS)
 
@@ -253,6 +281,7 @@ def send_python_code(session: str, code: str, begin: str, end: str) -> None:
 
     Writes code to a temp file to keep pane output clean (no base64 noise).
     """
+    check_deny(code, "python")
     import textwrap, tempfile
     run_tmux_cmd(["send-keys", "-t", session, "-X", "cancel"], capture=False)
 
@@ -281,6 +310,7 @@ def send_python_code(session: str, code: str, begin: str, end: str) -> None:
 
 def send_tcl_code(session: str, code: str, begin: str, end: str) -> None:
     """Send TCL code with markers."""
+    check_deny(code, "tcl")
     run_tmux_cmd(["send-keys", "-t", session, "-X", "cancel"], capture=False)
 
     tcl_cmd = f'puts "{begin}"; if {{[catch {{\n\n{code}\n\n}} __r]}} {{puts $__r}} elseif {{$__r ne ""}} {{puts $__r}}; puts "{end}"'
@@ -290,6 +320,7 @@ def send_tcl_code(session: str, code: str, begin: str, end: str) -> None:
 
 def send_shell_code(session: str, code: str, begin: str, end: str) -> None:
     """Send shell code with markers."""
+    check_deny(code, "shell")
     run_tmux_cmd(["send-keys", "-t", session, "-X", "cancel"], capture=False)
 
     run_tmux_cmd(["send-keys", "-t", session, f"echo '{begin}'; {{"], capture=False)
@@ -2067,6 +2098,7 @@ async def peek_output(pane: str, begin: str, wait: float) -> str:
 
 async def _peek_on_pane_py(p: str, code: str, wait: float, poll: str = None, poll_timeout: float = 30.0) -> str:
     """Peek helper for Python on a single pane."""
+    check_deny(code, "python")
     lock = acquire_pane_lock(p)
     lock_held = True
     try:
@@ -2089,6 +2121,7 @@ async def _peek_on_pane_py(p: str, code: str, wait: float, poll: str = None, pol
 
 async def _peek_on_pane_tcl(p: str, code: str, wait: float, poll: str = None, poll_timeout: float = 30.0) -> str:
     """Peek helper for TCL on a single pane."""
+    check_deny(code, "tcl")
     lock = acquire_pane_lock(p)
     lock_held = True
     try:
@@ -2110,6 +2143,7 @@ async def _peek_on_pane_tcl(p: str, code: str, wait: float, poll: str = None, po
 
 async def _peek_on_pane_sh(p: str, code: str, wait: float, poll: str = None, poll_timeout: float = 30.0) -> str:
     """Peek helper for shell on a single pane."""
+    check_deny(code, "shell")
     lock = acquire_pane_lock(p)
     lock_held = True
     try:
@@ -2219,6 +2253,7 @@ async def xsh_peek(
 @mcp.tool()
 def send_text(pane: str = None, text: str = "", enter: bool = Field(True, description="press Enter after text"), panes: list[str] = None) -> str:
     """Send text string to pane(s). For commands, passwords, etc."""
+    check_deny(text, "send_text")
     target_panes = _resolve_panes(pane, panes)
 
     if target_panes is not None:

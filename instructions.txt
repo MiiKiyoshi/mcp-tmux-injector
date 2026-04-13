@@ -1,5 +1,9 @@
 This describes how you use tmux-injector tools. This is how the system works.
 
+Panes are the user's live terminal sessions.
+Same shell, same aliases, same PATH, same environment as if the user typed directly.
+Not a sandboxed subprocess — commands have real consequences in the user's environment.
+
 ==========
 1. TOOL SELECTION
 ==========
@@ -186,8 +190,9 @@ When task_id exists (from xpy_start/xsh_start/xtcl_start), use task_wait.
 8. ABORT/TIMEOUT BEHAVIOR
 ==========
 
-Abort/timeout means "end marker not received", not "command not sent".
-The command was already sent to tmux. Do not resend.
+All x* tools send code to tmux before waiting for output.
+Any interruption — timeout, abort, user reject, cancel — means code was already sent.
+After interruption: capture_pane first. Do not send another command until pane state is confirmed.
 
 Timeout behavior:
     Blocking tools (xsh/xpy/xtcl) return [timeout] on timeout — no task created.

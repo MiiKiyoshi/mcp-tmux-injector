@@ -92,6 +92,27 @@ The agent dispatches to multiple panes simultaneously using `panes=` + `codes=`.
 
 `ls(session="work", gpu=True)` shows PID, process, cwd, and GPU memory per pane.
 
+## Configuration
+
+Optional deny-list to block specific commands from being sent to panes.
+
+Create `~/.config/mcp-tmux-injector/config.json`:
+
+```json
+{
+  "deny": {
+    "shell": ["kubectl *", "rm -rf /*"],
+    "python": [],
+    "tcl": [],
+    "send_text": ["kubectl *"]
+  }
+}
+```
+
+Each category corresponds to the tool type. Patterns use [fnmatch](https://docs.python.org/3/library/fnmatch.html) syntax and are matched per line of the code being sent. Matched commands are rejected before reaching the pane.
+
+If the file does not exist, no commands are blocked.
+
 ## Tool reference
 
 See [instructions.txt](instructions.txt) for the complete tool selection guide and usage patterns the agent follows.
