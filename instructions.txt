@@ -8,9 +8,10 @@ Not a sandboxed subprocess — commands have real consequences in the user's env
 1. TOOL SELECTION
 ==========
 
-┌─ Start interpreter (python3, openroad, etc.)
+┌─ Start interpreter or enter remote shell (python3, ssh, kubectl exec, etc.)
 │   └─→ xsh_peek / xpy_peek / xtcl_peek
-│       wait=1~2 seconds — OR — poll="prompt_pattern" to wait for a specific prompt
+│       wait=1~2 seconds
+│       Prompt changes (enter or exit) → xsh end markers break. Always peek.
 │
 ├─ Run short command (wait for completion)
 │   └─→ xsh / xpy / xtcl (blocking)
@@ -82,10 +83,10 @@ After respawn/create with cmd= (process starts immediately):
     # cmd= starts python3 before poll_pane runs → ">>>" already on screen
     # fresh=True here would timeout (ignores the already-printed ">>>")
 
-SSH connection:
-    xsh_peek(pane, "ssh user@host", poll="\\$", poll_timeout=15)  # wait for shell prompt
-    send_text(pane, "password")          # if password required
-    xsh(pane, "hostname")
+Entering a remote shell:
+    xsh_peek(pane, "mlx2", wait=2)         # kubectl exec, ssh, docker exec
+    xsh(pane, "hostname")                  # commands inside remote shell
+    xsh_peek(pane, "exit", wait=1)         # return to local shell
 
 Passing variables from REPL to script (globals trick):
     xpy(pane, "model_path = '/path/to/model'")
