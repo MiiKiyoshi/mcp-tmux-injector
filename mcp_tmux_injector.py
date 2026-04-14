@@ -105,8 +105,37 @@ _sessions: dict[str, dict] = {}
 # Registered working panes: pane -> {description, owner}
 _working_panes: dict[str, dict] = {}
 
+# Persist file for pane registrations (survives server restart)
+_PANES_PERSIST_FILE = Path.home() / ".config" / "mcp-tmux-injector" / "panes.json"
+
 # Client cwd from roots/list (cached after first query)
 _client_cwd: str | None = None
+
+
+def _save_panes():
+    """Save registered panes to disk for restore after restart."""
+    _PANES_PERSIST_FILE.parent.mkdir(parents=True, exist_ok=True)
+    data = {k: v["description"] for k, v in _working_panes.items()}
+    _PANES_PERSIST_FILE.write_text(json.dumps(data))
+
+
+def _restore_panes():
+    """Restore pane registrations from disk. Only restores panes that still exist in tmux."""
+    if not _PANES_PERSIST_FILE.exists():
+        return
+    try:
+        data = json.loads(_PANES_PERSIST_FILE.read_text())
+    except (json.JSONDecodeError, OSError):
+        return
+    restored = 0
+    for pane, description in data.items():
+        if check_session(pane):
+            _working_panes[pane] = {"description": description, "owner": EXTERNAL}
+            _auto_register_session_window(pane)
+            restored += 1
+    if restored:
+        import sys
+        print(f"Restored {restored} pane(s) from {_PANES_PERSIST_FILE}", file=sys.stderr)
 
 
 async def _get_client_cwd(ctx: Context) -> str | None:
@@ -2026,6 +2055,7 @@ def set_pane(pane: str, description: str) -> str:
 
     _working_panes[pane] = {"description": description, "owner": EXTERNAL}
     _auto_register_session_window(pane)
+    _save_panes()
     return f"Registered: {pane} ({description})"
 
 
@@ -2036,6 +2066,7 @@ def remove_pane(pane: str) -> str:
         raise ValueError(f"Pane '{pane}' is not registered")
 
     del _working_panes[pane]
+    _save_panes()
     return f"Removed: {pane}"
 
 
@@ -2420,6 +2451,7 @@ def main():
         p for p in os.environ.get("PATH", "").split(":") if "/.venv/" not in p
     )
     os.environ.pop("VIRTUAL_ENV", None)
+    _restore_panes()
     mcp.run(transport="stdio")
 
 
