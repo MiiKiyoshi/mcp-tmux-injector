@@ -31,7 +31,7 @@ CLI agents like Claude Code run in their own process. They can't natively intera
 ## Installation
 
 ```bash
-git clone https://github.com/yourusername/mcp-tmux-injector
+git clone https://github.com/MiiKiyoshi/mcp-tmux-injector
 cd mcp-tmux-injector
 pip install -e .
 ```
