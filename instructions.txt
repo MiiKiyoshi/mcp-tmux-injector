@@ -226,17 +226,18 @@ New session or server restart: ask user which pane to use.
 10. OWNERSHIP MODEL
 ==========
 
-set_pane() auto-registers the session/window as "external".
-create_session()/create_window() registers as "managed".
+managed  = created this session via create_session/create_window.
+external = set_pane()-registered. Origin opaque — user, a script, prior Claude,
+           anyone. "external" labels the registration path, not ownership.
 
-tmux kill-session, tmux kill-window via Bash: NEVER used.
-All session/window lifecycle is through MCP tools only.
+Claude's direct shell: no tmux new-session/kill-session/new-window/kill-window.
+Lifecycle via MCP tools. (Scripts invoking tmux internally are unaffected; their
+sessions surface as external on first set_pane().)
 
-External sessions are user-owned. Structure modification (create_window, kill_window)
-on external sessions does not occur.
-New workspaces → create_session(). Existing external panes → set_pane() to register.
+Reading an external label:
+  - Name referenced in project workflow or current task → work target, proceed normally.
+  - No reference anywhere → treat as user terminal, do not restructure.
+  - Ambiguous → ask.
 
-Temporary work (one-off ssh, sync, file transfer, etc.):
+Side work (one-off ssh, sync, file transfer):
     create_session("tmp") → work → kill_session("tmp")
-
-    Existing user panes are never borrowed for temporary work.
