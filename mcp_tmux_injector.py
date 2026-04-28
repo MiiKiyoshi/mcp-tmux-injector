@@ -16,14 +16,14 @@ USAGE PATTERNS:
    xsh(pane, "echo hello && pwd")
 
 2. Python REPL (enter and exit):
-   xsh_peek(pane, "python3")     # Start Python
-   xpy(pane, "print(1+1)")       # Run Python code
-   xpy_peek(pane, "exit()")      # Exit Python
+   xsh(pane, "python3", read_after=2)   # Start Python
+   xpy(pane, "print(1+1)")              # Run Python code
+   xpy(pane, "exit()", read_after=1)    # Exit Python
 
 3. OpenROAD/TCL (enter and exit):
-   xsh_peek(pane, "openroad")    # Start OpenROAD
-   xtcl(pane, "puts hello")      # Run TCL code
-   xtcl_peek(pane, "exit")       # Exit OpenROAD
+   xsh(pane, "openroad", read_after=2)  # Start OpenROAD
+   xtcl(pane, "puts hello")             # Run TCL code
+   xtcl(pane, "exit", read_after=1)     # Exit OpenROAD
 
 4. Interrupt/kill running process:
    send_keys(pane, "C-c C-c C-c")   # Send Ctrl+C multiple times
@@ -107,6 +107,12 @@ _working_panes: dict[str, dict] = {}
 
 # Persist file for pane registrations (survives server restart)
 _PANES_PERSIST_FILE = Path.home() / ".config" / "mcp-tmux-injector" / "panes.json"
+
+# Directory for fingerprint snapshot files (used by Monitor-mode poll_pane)
+_FINGERPRINT_DIR = Path.home() / ".cache" / "mcp-tmux-injector" / "fingerprints"
+
+# Server source directory — used to build `uv run --directory ...` watch commands
+_SERVER_DIR = Path(__file__).resolve().parent
 
 # Client cwd from roots/list (cached after first query)
 _client_cwd: str | None = None
@@ -216,7 +222,7 @@ def _check_not_python(pane: str) -> None:
         cmd = run_tmux_cmd(["display-message", "-p", "-t", pane, "#{pane_current_command}"])
         if cmd.strip().startswith("python"):
             raise ValueError(
-                f"Pane '{pane}' is running {cmd.strip()}. Use xpy/xpy_start/xpy_peek instead of xsh."
+                f"Pane '{pane}' is running {cmd.strip()}. Use xpy instead of xsh."
             )
     except subprocess.CalledProcessError:
         pass
@@ -656,8 +662,12 @@ def check_task_output(session: str, begin: str, end: str) -> tuple[str, bool]:
     return extract_output(raw, begin, end)
 
 
+_BLOCKING_TIMEOUT_MAX = 60.0
+
+
 async def capture_output_blocking(session: str, begin: str, end: str, timeout: float) -> str:
-    """Capture output between markers (blocking)."""
+    """Capture output between markers (blocking). Timeout is capped to 60s."""
+    timeout = min(timeout, _BLOCKING_TIMEOUT_MAX)
     start_time = time.time()
 
     while time.time() - start_time < timeout:
@@ -935,9 +945,18 @@ async def _blocking_on_pane(p: str, code: str, send_fn, timeout: float, filter_k
 
         return filtered
     except TimeoutError:
-        lock.release()
+        _tasks[task_id] = {
+            "pane": p, "begin": begin, "end": end,
+            "start_time": start_time, "type": task_type,
+            "command": code, "lock": lock,
+        }
         converted = True
-        return f"[timeout] Command was sent but end marker not received within {timeout}s. Process may still be running in tmux. Use xsh_start for long-running commands."
+        threading.Thread(target=_watch_task_completion, args=(task_id,), daemon=True).start()
+        return (
+            f"[task] {task_id} on {p} — did not finish in {timeout}s.\n"
+            f"task_wait('{task_id}')   → Monitor command for completion notification\n"
+            f"task_output('{task_id}') → partial output now"
+        )
     except asyncio.CancelledError:
         _tasks[task_id] = {
             "pane": p, "begin": begin, "end": end,
@@ -975,7 +994,8 @@ async def xpy(
     code: str = None,
     codes: list[str] = None,
     file: str = Field(None, description="Execute a .py file via exec(). Path resolved relative to agent cwd. Use instead of code='exec(open(...).read())'"),
-    timeout: float = 60.0,
+    timeout: float = Field(None, description="default mode: max seconds to wait for end marker before auto-promoting to background task (default 3s, capped at 60s). Mutually exclusive with read_after."),
+    read_after: float = Field(None, description="read_after mode: skip end-marker detection, send code, sleep N seconds, return pane capture from begin marker. For prompt-changing commands (entering/exiting REPL, ssh). Capped at 60s. Mutually exclusive with timeout."),
     tail: int = 0,
     head: int = None,
     force: bool = Field(False, description="return full output without truncation"),
@@ -994,7 +1014,16 @@ async def xpy(
     panes: list[str] = None,
     ctx: Context = None
 ) -> str:
-    """Execute Python code in tmux (blocking). On abort/timeout, code was already sent — do NOT resend."""
+    """Execute Python code in tmux. Default mode auto-promotes to a task on
+    timeout. read_after mode skips marker detection (use for entering/exiting
+    REPLs, ssh). On abort/timeout, code was already sent — do NOT resend."""
+    from pydantic.fields import FieldInfo
+    if isinstance(timeout, FieldInfo):
+        timeout = timeout.default
+    if isinstance(read_after, FieldInfo):
+        read_after = read_after.default
+    if read_after is not None and timeout is not None:
+        raise ValueError("timeout and read_after are mutually exclusive")
     target_panes = _resolve_panes(pane, panes)
     _validate_multi(code, codes, "codes", target_panes)
 
@@ -1012,13 +1041,22 @@ async def xpy(
 
     fkw = dict(grep=grep, v=v, i=i, w=w, F=F, m=m, A=A, B=B, C=C, n=n, uniq=uniq, strip_tqdm=strip_tqdm)
 
+    if read_after is not None:
+        if target_panes is not None:
+            return await _read_after_multi(target_panes, code, "python", read_after, fkw, tail, head, codes)
+        check_pane_registered(pane)
+        if not check_session(pane):
+            raise ValueError(f"Pane '{pane}' not found in tmux")
+        return await _read_after_on_pane(pane, code, "python", read_after, fkw, tail, head)
+
+    effective_timeout = timeout if timeout is not None else 3.0
     if target_panes is not None:
-        return await _blocking_multi(target_panes, code, send_python_code, timeout, fkw, task_type="python", tail=tail, head=head, force=force, codes=codes)
+        return await _blocking_multi(target_panes, code, send_python_code, effective_timeout, fkw, task_type="python", tail=tail, head=head, force=force, codes=codes)
 
     check_pane_registered(pane)
     if not check_session(pane):
         raise ValueError(f"Pane '{pane}' not found in tmux")
-    return await _blocking_on_pane(pane, code, send_python_code, timeout, fkw, task_type="python", tail=tail, head=head, force=force)
+    return await _blocking_on_pane(pane, code, send_python_code, effective_timeout, fkw, task_type="python", tail=tail, head=head, force=force)
 
 
 @mcp.tool()
@@ -1026,7 +1064,8 @@ async def xtcl(
     pane: str = None,
     code: str = "",
     codes: list[str] = None,
-    timeout: float = 60.0,
+    timeout: float = Field(None, description="default mode: max seconds to wait for end marker before auto-promoting to background task (default 3s, capped at 60s). Mutually exclusive with read_after."),
+    read_after: float = Field(None, description="read_after mode: skip end-marker detection, send code, sleep N seconds, return pane capture from begin marker. For prompt-changing commands (entering/exiting REPL, ssh). Capped at 60s. Mutually exclusive with timeout."),
     tail: int = 0,
     head: int = None,
     force: bool = Field(False, description="return full output without truncation"),
@@ -1044,7 +1083,16 @@ async def xtcl(
     strip_tqdm: bool = Field(False, description="remove tqdm lines, keep last group"),
     panes: list[str] = None
 ) -> str:
-    """Execute TCL code in tmux (blocking). On abort/timeout, code was already sent — do NOT resend."""
+    """Execute TCL code in tmux. Default mode auto-promotes to a task on
+    timeout. read_after mode skips marker detection (use for entering/exiting
+    REPLs). On abort/timeout, code was already sent — do NOT resend."""
+    from pydantic.fields import FieldInfo
+    if isinstance(timeout, FieldInfo):
+        timeout = timeout.default
+    if isinstance(read_after, FieldInfo):
+        read_after = read_after.default
+    if read_after is not None and timeout is not None:
+        raise ValueError("timeout and read_after are mutually exclusive")
     target_panes = _resolve_panes(pane, panes)
     _validate_multi(code, codes, "codes", target_panes)
 
@@ -1053,13 +1101,22 @@ async def xtcl(
 
     fkw = dict(grep=grep, v=v, i=i, w=w, F=F, m=m, A=A, B=B, C=C, n=n, uniq=uniq, strip_tqdm=strip_tqdm)
 
+    if read_after is not None:
+        if target_panes is not None:
+            return await _read_after_multi(target_panes, code, "tcl", read_after, fkw, tail, head, codes)
+        check_pane_registered(pane)
+        if not check_session(pane):
+            raise ValueError(f"Pane '{pane}' not found in tmux")
+        return await _read_after_on_pane(pane, code, "tcl", read_after, fkw, tail, head)
+
+    effective_timeout = timeout if timeout is not None else 3.0
     if target_panes is not None:
-        return await _blocking_multi(target_panes, code, send_tcl_code, timeout, fkw, task_type="tcl", tail=tail, head=head, force=force, codes=codes)
+        return await _blocking_multi(target_panes, code, send_tcl_code, effective_timeout, fkw, task_type="tcl", tail=tail, head=head, force=force, codes=codes)
 
     check_pane_registered(pane)
     if not check_session(pane):
         raise ValueError(f"Pane '{pane}' not found in tmux")
-    return await _blocking_on_pane(pane, code, send_tcl_code, timeout, fkw, task_type="tcl", tail=tail, head=head, force=force)
+    return await _blocking_on_pane(pane, code, send_tcl_code, effective_timeout, fkw, task_type="tcl", tail=tail, head=head, force=force)
 
 
 @mcp.tool()
@@ -1068,7 +1125,8 @@ async def xsh(
     code: str = None,
     codes: list[str] = None,
     file: str = None,
-    timeout: float = 60.0,
+    timeout: float = Field(None, description="default mode: max seconds to wait for end marker before auto-promoting to background task (default 3s, capped at 60s). Mutually exclusive with read_after."),
+    read_after: float = Field(None, description="read_after mode: skip end-marker detection, send code, sleep N seconds, return pane capture from begin marker. For prompt-changing commands (entering/exiting REPL, ssh). Capped at 60s. Mutually exclusive with timeout."),
     tail: int = 0,
     head: int = None,
     force: bool = Field(False, description="return full output without truncation"),
@@ -1087,7 +1145,16 @@ async def xsh(
     panes: list[str] = None,
     ctx: Context = None
 ) -> str:
-    """Execute shell command in tmux (blocking). On abort/timeout, code was already sent — do NOT resend."""
+    """Execute shell command in tmux. Default mode auto-promotes to a task on
+    timeout. read_after mode skips marker detection (use for entering/exiting
+    REPLs, ssh). On abort/timeout, code was already sent — do NOT resend."""
+    from pydantic.fields import FieldInfo
+    if isinstance(timeout, FieldInfo):
+        timeout = timeout.default
+    if isinstance(read_after, FieldInfo):
+        read_after = read_after.default
+    if read_after is not None and timeout is not None:
+        raise ValueError("timeout and read_after are mutually exclusive")
     target_panes = _resolve_panes(pane, panes)
     _validate_multi(code, codes, "codes", target_panes)
 
@@ -1105,16 +1172,26 @@ async def xsh(
 
     fkw = dict(grep=grep, v=v, i=i, w=w, F=F, m=m, A=A, B=B, C=C, n=n, uniq=uniq, strip_tqdm=strip_tqdm)
 
+    if read_after is not None:
+        if target_panes is not None:
+            return await _read_after_multi(target_panes, code, "shell", read_after, fkw, tail, head, codes)
+        check_pane_registered(pane)
+        _check_not_python(pane)
+        if not check_session(pane):
+            raise ValueError(f"Pane '{pane}' not found in tmux")
+        return await _read_after_on_pane(pane, code, "shell", read_after, fkw, tail, head)
+
+    effective_timeout = timeout if timeout is not None else 3.0
     if target_panes is not None:
         for p in target_panes:
             _check_not_python(p)
-        return await _blocking_multi(target_panes, code, send_shell_code, timeout, fkw, tail=tail, head=head, force=force, codes=codes)
+        return await _blocking_multi(target_panes, code, send_shell_code, effective_timeout, fkw, tail=tail, head=head, force=force, codes=codes)
 
     check_pane_registered(pane)
     _check_not_python(pane)
     if not check_session(pane):
         raise ValueError(f"Pane '{pane}' not found in tmux")
-    return await _blocking_on_pane(pane, code, send_shell_code, timeout, fkw, tail=tail, head=head, force=force)
+    return await _blocking_on_pane(pane, code, send_shell_code, effective_timeout, fkw, tail=tail, head=head, force=force)
 
 
 # =============================================================================
@@ -1150,6 +1227,123 @@ def _check_end_marker(pane: str, end: str, tail: int = 200) -> bool:
     return any(line == end for line in _split_capture(raw))
 
 
+def _build_watch_cmd_task(task_id: str, pane: str, end: str) -> str:
+    """Build a shell command to pass to Monitor for task completion watch."""
+    return (
+        f"uv run --directory {shlex.quote(str(_SERVER_DIR))} "
+        f"mcp-tmux-injector watch task "
+        f"--task-id {shlex.quote(task_id)} "
+        f"--pane {shlex.quote(pane)} "
+        f"--end {shlex.quote(end)}"
+    )
+
+
+def _build_watch_cmd_pane(pane: str, pattern: str, fp_path: Path,
+                          fp_total: int, fresh: bool, ignore_case: bool, literal: bool) -> str:
+    """Build a shell command to pass to Monitor for pattern-match watch."""
+    parts = [
+        f"uv run --directory {shlex.quote(str(_SERVER_DIR))}",
+        "mcp-tmux-injector watch pane",
+        f"--pane {shlex.quote(pane)}",
+        f"--pattern {shlex.quote(pattern)}",
+        f"--fingerprint-file {shlex.quote(str(fp_path))}",
+        f"--fingerprint-total {fp_total}",
+    ]
+    if fresh:
+        parts.append("--fresh")
+    if ignore_case:
+        parts.append("-i")
+    if literal:
+        parts.append("-F")
+    return " ".join(parts)
+
+
+def _cli_watch_task(pane: str, end: str, task_id: str) -> int:
+    """Watch CLI: poll for end marker. Print one line and exit on completion or error signature."""
+    interval = 0.5
+    max_interval = 10.0
+    fail_pat = re.compile(r"Traceback|Killed|OOM|Segmentation fault")
+    while True:
+        try:
+            if _check_end_marker(pane, end):
+                print(f"[done] task {task_id}", flush=True)
+                return 0
+            raw = run_tmux_cmd(["capture-pane", "-t", pane, "-p", "-J", "-S", "-200"], raise_on_error=True)
+            for line in _split_capture(raw):
+                if fail_pat.search(line):
+                    print(f"[fail] task {task_id}: {line}", flush=True)
+                    return 0
+        except Exception as e:
+            print(f"[error] task {task_id}: {e}", flush=True)
+            return 1
+        time.sleep(interval)
+        interval = min(interval * 2, max_interval)
+
+
+def _cli_watch_pane(pane: str, pattern: str, fp_path: Path, fp_total: int,
+                    fresh: bool, ignore_case: bool, literal: bool) -> int:
+    """Watch CLI: poll for pattern. Print first matching line and exit."""
+    flags = re.IGNORECASE if ignore_case else 0
+    pat = re.escape(pattern) if literal else pattern
+    regex = re.compile(pat, flags)
+
+    fp_lines: list[str] = []
+    if fresh and fp_path.exists():
+        fp_lines = json.loads(fp_path.read_text()).get("lines", [])
+
+    interval = 0.5
+    max_interval = 10.0
+    try:
+        while True:
+            try:
+                raw = run_tmux_cmd(["capture-pane", "-t", pane, "-p", "-J", "-S", "-200"], raise_on_error=True)
+                lines = _split_capture(raw)
+                search = _get_fresh_lines(lines, fp_lines, fp_total) if fresh else lines
+                for line in search:
+                    if regex.search(line):
+                        print(f"[match] {line}", flush=True)
+                        return 0
+            except Exception as e:
+                print(f"[error] pane {pane}: {e}", flush=True)
+                return 1
+            time.sleep(interval)
+            interval = min(interval * 2, max_interval)
+    finally:
+        try:
+            fp_path.unlink()
+        except (OSError, FileNotFoundError):
+            pass
+
+
+def _cli_watch(args: list[str]) -> int:
+    """CLI entry point dispatched from main() when argv[1] == 'watch'."""
+    import argparse
+    p = argparse.ArgumentParser(prog="mcp-tmux-injector watch")
+    sub = p.add_subparsers(dest="kind", required=True)
+
+    pt = sub.add_parser("task")
+    pt.add_argument("--task-id", required=True)
+    pt.add_argument("--pane", required=True)
+    pt.add_argument("--end", required=True)
+
+    pp = sub.add_parser("pane")
+    pp.add_argument("--pane", required=True)
+    pp.add_argument("--pattern", required=True)
+    pp.add_argument("--fingerprint-file", required=True)
+    pp.add_argument("--fingerprint-total", type=int, default=0)
+    pp.add_argument("--fresh", action="store_true")
+    pp.add_argument("-i", dest="ignore_case", action="store_true")
+    pp.add_argument("-F", dest="literal", action="store_true")
+
+    ns = p.parse_args(args)
+    if ns.kind == "task":
+        return _cli_watch_task(ns.pane, ns.end, ns.task_id)
+    return _cli_watch_pane(
+        ns.pane, ns.pattern, Path(ns.fingerprint_file),
+        ns.fingerprint_total, ns.fresh, ns.ignore_case, ns.literal,
+    )
+
+
 def _watch_task_completion(task_id: str) -> None:
     """Background thread: poll for end marker and finalize task."""
     task = _tasks.get(task_id)
@@ -1180,147 +1374,6 @@ def _watch_task_completion(task_id: str) -> None:
                 return
         time.sleep(interval)
         interval = min(interval * 2, max_interval)
-
-
-def _start_on_pane(p: str, code: str, task_type: str, send_fn) -> str:
-    """Start a non-blocking task on a single pane. Returns status string."""
-    if not check_session(p):
-        return f"{p}: not found (skipped)"
-
-    lock = get_pane_lock(p)
-    if not lock.acquire(blocking=False):
-        return f"{p}: busy (skipped)"
-
-    task_id, begin, end = generate_task_id_and_marker()
-    send_fn(p, code, begin, end)
-
-    _tasks[task_id] = {
-        "pane": p,
-        "begin": begin,
-        "end": end,
-        "start_time": time.time(),
-        "type": task_type,
-        "command": code,
-        "lock": lock
-    }
-
-    threading.Thread(target=_watch_task_completion, args=(task_id,), daemon=True).start()
-
-    return f"{p}: {task_id} (started)"
-
-
-@mcp.tool()
-async def xpy_start(
-    pane: str = None,
-    code: str = None,
-    codes: list[str] = None,
-    file: str = Field(None, description="Execute a .py file via exec(). Path resolved relative to agent cwd. Use instead of code='exec(open(...).read())'"),
-    panes: list[str] = None,
-    ctx: Context = None
-) -> str:
-    """Start Python code execution (non-blocking). Returns task_id immediately.
-
-    Use task_status for status, task_output for output, task_wait to block."""
-    target_panes = _resolve_panes(pane, panes)
-    _validate_multi(code, codes, "codes", target_panes)
-
-    if file:
-        if codes:
-            raise ValueError("Use 'file' or 'codes', not both")
-        client_cwd = await _get_client_cwd(ctx) if ctx else _client_cwd
-        abs_path = _resolve_file_path(file, client_cwd)
-        if not os.path.isfile(abs_path):
-            raise FileNotFoundError(f"File not found: {abs_path}")
-        code = f"exec(compile(open('{abs_path}').read(), '{abs_path}', 'exec'))"
-
-    if not code and not codes:
-        raise ValueError("Either 'code', 'codes', or 'file' must be provided")
-
-    if target_panes is not None:
-        results = [_start_on_pane(p, codes[i] if codes else code, "python", send_python_code) for i, p in enumerate(target_panes)]
-        return '\n'.join(results)
-
-    check_pane_registered(pane)
-    lock = acquire_pane_lock(pane)
-    task_id, begin, end = generate_task_id_and_marker()
-    send_python_code(pane, code, begin, end)
-    _tasks[task_id] = {
-        "pane": pane, "begin": begin, "end": end,
-        "start_time": time.time(), "type": "python", "command": code, "lock": lock
-    }
-    threading.Thread(target=_watch_task_completion, args=(task_id,), daemon=True).start()
-    return f"Started task {task_id} on {pane}"
-
-
-@mcp.tool()
-def xtcl_start(pane: str = None, code: str = "", codes: list[str] = None, panes: list[str] = None) -> str:
-    """Start TCL code execution (non-blocking). Returns task_id immediately."""
-    target_panes = _resolve_panes(pane, panes)
-    _validate_multi(code, codes, "codes", target_panes)
-
-    if not code and not codes:
-        raise ValueError("Either 'code' or 'codes' must be provided")
-
-    if target_panes is not None:
-        results = [_start_on_pane(p, codes[i] if codes else code, "tcl", send_tcl_code) for i, p in enumerate(target_panes)]
-        return '\n'.join(results)
-
-    check_pane_registered(pane)
-    lock = acquire_pane_lock(pane)
-    task_id, begin, end = generate_task_id_and_marker()
-    send_tcl_code(pane, code, begin, end)
-    _tasks[task_id] = {
-        "pane": pane, "begin": begin, "end": end,
-        "start_time": time.time(), "type": "tcl", "command": code, "lock": lock
-    }
-    threading.Thread(target=_watch_task_completion, args=(task_id,), daemon=True).start()
-    return f"Started task {task_id} on {pane}"
-
-
-@mcp.tool()
-async def xsh_start(
-    pane: str = None,
-    code: str = None,
-    codes: list[str] = None,
-    file: str = None,
-    panes: list[str] = None,
-    ctx: Context = None
-) -> str:
-    """Start shell command execution (non-blocking). Returns task_id immediately.
-
-    Use task_status for status, task_output for output, task_wait to block."""
-    target_panes = _resolve_panes(pane, panes)
-    _validate_multi(code, codes, "codes", target_panes)
-
-    if file:
-        if codes:
-            raise ValueError("Use 'file' or 'codes', not both")
-        client_cwd = await _get_client_cwd(ctx) if ctx else _client_cwd
-        abs_path = _resolve_file_path(file, client_cwd)
-        if not os.path.isfile(abs_path):
-            raise FileNotFoundError(f"File not found: {abs_path}")
-        code = f"source '{abs_path}'"
-
-    if not code and not codes:
-        raise ValueError("Either 'code', 'codes', or 'file' must be provided")
-
-    if target_panes is not None:
-        for p in target_panes:
-            _check_not_python(p)
-        results = [_start_on_pane(p, codes[i] if codes else code, "shell", send_shell_code) for i, p in enumerate(target_panes)]
-        return '\n'.join(results)
-
-    check_pane_registered(pane)
-    _check_not_python(pane)
-    lock = acquire_pane_lock(pane)
-    task_id, begin, end = generate_task_id_and_marker()
-    send_shell_code(pane, code, begin, end)
-    _tasks[task_id] = {
-        "pane": pane, "begin": begin, "end": end,
-        "start_time": time.time(), "type": "shell", "command": code, "lock": lock
-    }
-    threading.Thread(target=_watch_task_completion, args=(task_id,), daemon=True).start()
-    return f"Started task {task_id} on {pane}"
 
 
 @mcp.tool()
@@ -1464,90 +1517,24 @@ def task_output(
     )
 
 
-async def _wait_single_task(task_id: str, timeout: float) -> str:
-    """Wait for a single task to complete. Returns status string."""
-    task = _tasks[task_id]
-    start_time = time.time()
-
-    interval = 0.5
-    max_interval = 10.0
-    while time.time() - start_time < timeout:
-        if "end_time" in task:
-            elapsed = task["end_time"] - task["start_time"]
-            return f"[completed] {elapsed:.1f}s"
-        await asyncio.sleep(interval)
-        try:
-            found = _check_end_marker(task["pane"], task["end"])
-        except RuntimeError as e:
-            task["error"] = str(e)
-            task["cached_output"] = f"[error] {e}"
-            _finalize_task(task)
-            elapsed = task["end_time"] - task["start_time"]
-            return f"[error] {e} ({elapsed:.1f}s)"
-        if found:
-            output, completed = check_task_output(task["pane"], task["begin"], task["end"])
-            if completed:
-                task["cached_output"] = output
-                _finalize_task(task)
-                elapsed = task["end_time"] - task["start_time"]
-                return f"[completed] {elapsed:.1f}s"
-        interval = min(interval * 2, max_interval)
-
-    return f"[timeout] {timeout}s"
-
-
 @mcp.tool()
-async def task_wait(
-    task_id: str = None, task_ids: list[str] = None,
-    pane: str = None, panes: list[str] = None,
-    timeout: float = 60.0, race: bool = Field(False, description="return when ANY task completes (vs all)")
-) -> str:
-    """Wait for task completion (blocking). Returns status only."""
-    # Resolve pane/panes to task_id/task_ids
-    if pane is not None:
-        task_id = _resolve_task_id(None, pane)
-    if panes is not None:
-        task_ids = _resolve_task_ids_from_panes(panes)
+def task_wait(task_id: str = None, pane: str = None) -> str:
+    """Return a shell command for Monitor that emits one line on task completion.
 
-    specified = sum(x is not None for x in [task_id, task_ids])
-    if specified != 1:
-        raise ValueError("Exactly one of task_id/task_ids/pane/panes must be specified")
+    Pass the returned string directly to Monitor's `command` parameter. Monitor
+    runs it in the background; when the task ends (or shows a failure
+    signature), Monitor delivers a notification line. Then call task_output to
+    read the body.
 
-    if task_id is not None:
-        if task_id not in _tasks:
-            raise ValueError(f"Task '{task_id}' not found")
-        result = await _wait_single_task(task_id, timeout)
-        if result.startswith("[timeout]"):
-            raise TimeoutError(f"Task did not complete within {timeout}s")
-        return result
-
-    not_found = [tid for tid in task_ids if tid not in _tasks]
-    if not_found:
-        raise ValueError(f"Tasks not found: {', '.join(not_found)}")
-
-    if race:
-        async_tasks = {}
-        for tid in task_ids:
-            async_tasks[asyncio.create_task(_wait_single_task(tid, timeout))] = tid
-
-        done, pending = await asyncio.wait(async_tasks.keys(), return_when=asyncio.FIRST_COMPLETED)
-
-        for t in pending:
-            t.cancel()
-
-        lines = []
-        for t in done:
-            tid = async_tasks[t]
-            lines.append(f"{tid}: {t.result()}")
-        for t in pending:
-            tid = async_tasks[t]
-            elapsed = time.time() - _tasks[tid]["start_time"]
-            lines.append(f"{tid}: [running] {elapsed:.1f}s")
-
-        return '\n'.join(lines)
-
-    results = await asyncio.gather(*[_wait_single_task(tid, timeout) for tid in task_ids])
-    return '\n'.join(f"{tid}: {res}" for tid, res in zip(task_ids, results))
+    Either task_id or pane must be provided.
+    """
+    resolved_id = _resolve_task_id(task_id, pane)
+    if resolved_id not in _tasks:
+        raise ValueError(f"Task '{resolved_id}' not found")
+    task = _tasks[resolved_id]
+    if "end_time" in task:
+        return f"echo '[done] task {resolved_id} (already complete)'"
+    return _build_watch_cmd_task(resolved_id, task["pane"], task["end"])
 
 
 def _find_fingerprint(lines: list[str], fingerprint: list[str]) -> int | None:
@@ -1606,113 +1593,38 @@ def _get_fresh_lines(lines: list[str], fingerprint: list[str], fingerprint_total
         return lines[fingerprint_total:] if len(lines) > fingerprint_total else []
 
 
-async def _poll_for_pattern(p: str, pattern: str, timeout: float) -> str:
-    """Poll pane for pattern in new output (always fresh=True).
-
-    Returns all new lines visible when the pattern first appears.
-    Raises TimeoutError if pattern not found within timeout seconds.
-    """
-    fingerprint, fingerprint_total = _build_fingerprint(p)
-    regex = re.compile(pattern)
-    start = time.time()
-    interval = 0.5
-
-    while time.time() - start < timeout:
-        raw = run_tmux_cmd(["capture-pane", "-t", p, "-p", "-J", "-S", "-200"], raise_on_error=True)
-        lines = _split_capture(raw)
-        search_lines = _get_fresh_lines(lines, fingerprint, fingerprint_total)
-        if any(regex.search(l) for l in search_lines):
-            return '\n'.join(search_lines)
-        await asyncio.sleep(interval)
-        interval = min(interval * 2, 10.0)
-
-    raise TimeoutError(f"Pattern '{pattern}' not found in pane '{p}' within {timeout}s")
-
-
 @mcp.tool()
-async def poll_pane(
-    pane: str = None,
-    panes: list[str] = None,
-    pattern: str = "",
-    timeout: float = 300.0,
-    fresh: bool = Field(True, description="True (default): ignore pre-existing content — use after xsh_peek/send_text. False: match pre-existing — required after respawn_pane(cmd=) or create_session(cmd=)"),
+def poll_pane(
+    pane: str,
+    pattern: str,
+    fresh: bool = Field(True, description="True (default): ignore pre-existing content — use after read_after/send_text. False: match pre-existing — required after respawn_pane(cmd=) or create_session(cmd=)"),
     i: bool = Field(False, description="case insensitive match"),
     F: bool = Field(False, description="literal string, not regex"),
-    A: int = Field(None, description="lines after match"),
-    B: int = Field(None, description="lines before match"),
-    C: int = Field(None, description="context lines around match"),
 ) -> str:
-    """Poll pane until pattern appears. Blocks until match or timeout.
-    fresh=True (default): only matches NEW output. Pre-existing pattern is IGNORED.
-    fresh=False: searches all content including pre-existing.
-    Returns matched lines with optional context.
-    pane: single pane or list of panes. With multiple panes, returns as soon as ANY matches.
+    """Return a shell command for Monitor that emits one line on first pattern match.
+
+    Pass the returned string directly to Monitor's `command` parameter. Monitor
+    runs it in the background; when the pattern first appears in the pane,
+    Monitor delivers a notification line of the form '[match] <line>'.
+
+    fresh=True (default): only matches output produced AFTER this call. The
+    fingerprint snapshot is taken NOW.
+    fresh=False: also matches pre-existing content.
+
+    For multi-pane race, spawn multiple Monitors with separate poll_pane calls.
     """
     if not pattern:
         raise ValueError("pattern is required")
+    check_pane_registered(pane)
+    if not check_session(pane):
+        raise ValueError(f"Pane '{pane}' not found in tmux")
 
-    target_panes = _resolve_panes(pane, panes)
-    if target_panes is None:
-        if pane is None:
-            raise ValueError("pane is required")
-        check_pane_registered(pane)
-        if not check_session(pane):
-            raise ValueError(f"Pane '{pane}' not found in tmux")
-        target_panes = [pane]
-    else:
-        for p in target_panes:
-            if not check_session(p):
-                raise ValueError(f"Pane '{p}' not found in tmux")
+    fp_lines, fp_total = _build_fingerprint(pane) if fresh else ([], 0)
+    _FINGERPRINT_DIR.mkdir(parents=True, exist_ok=True)
+    fp_path = _FINGERPRINT_DIR / f"fp_{int(time.time()*1000)}_{random.randint(0, 0xFFFF):04x}.json"
+    fp_path.write_text(json.dumps({"lines": fp_lines, "total": fp_total}))
 
-    flags = re.IGNORECASE if i else 0
-    pat = re.escape(pattern) if F else pattern
-    regex = re.compile(pat, flags)
-    before = B if B is not None else (C or 0)
-    after = A if A is not None else (C or 0)
-
-    async def _poll_one(p: str) -> str:
-        fingerprint, fingerprint_total = _build_fingerprint(p) if fresh else ([], 0)
-        start_time = time.time()
-        interval = 0.5
-        max_interval = 10.0
-
-        while time.time() - start_time < timeout:
-            raw = run_tmux_cmd(
-                ["capture-pane", "-t", p, "-p", "-J", "-S", "-200"],
-                raise_on_error=True,
-            )
-            lines = _split_capture(raw)
-            search_lines = _get_fresh_lines(lines, fingerprint, fingerprint_total) if fresh else lines
-
-            matched_indices = [idx for idx, line in enumerate(search_lines) if regex.search(line)]
-            if matched_indices:
-                result_lines = []
-                included = set()
-                for idx in matched_indices:
-                    lo = max(0, idx - before)
-                    hi = min(len(search_lines), idx + after + 1)
-                    for j in range(lo, hi):
-                        if j not in included:
-                            included.add(j)
-                            result_lines.append(search_lines[j])
-                elapsed = time.time() - start_time
-                header = f"[matched] pane={p} {len(matched_indices)} hit(s) after {elapsed:.1f}s"
-                return header + '\n' + '\n'.join(result_lines)
-
-            await asyncio.sleep(interval)
-            interval = min(interval * 2, max_interval)
-
-        raise TimeoutError(f"Pattern '{pattern}' not found in pane '{p}' within {timeout}s")
-
-    if len(target_panes) == 1:
-        return await _poll_one(target_panes[0])
-
-    tasks = {asyncio.create_task(_poll_one(p)): p for p in target_panes}
-    done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-    for t in pending:
-        t.cancel()
-    winner = done.pop()
-    return winner.result()
+    return _build_watch_cmd_pane(pane, pattern, fp_path, fp_total, fresh, i, F)
 
 
 @mcp.tool()
@@ -2116,100 +2028,71 @@ def respawn_pane(pane: str = None, panes: list[str] = None, start_dir: str = Non
     return _respawn_single(pane, start_dir, cmd)
 
 
-async def peek_output(pane: str, begin: str, wait: float) -> str:
-    """Wait and capture output after begin marker."""
-    await asyncio.sleep(wait)
-
-    for n_lines in [1000, 4000, 16000]:
-        raw = run_tmux_cmd(["capture-pane", "-t", pane, "-p", "-J", "-S", f"-{n_lines}"])
-        if begin in raw:
-            break
-    else:
-        raw = run_tmux_cmd(["capture-pane", "-t", pane, "-p", "-J", "-S", "-"])
-
-    lines = _split_capture(raw)
-    capturing = False
-    result = []
-    for line in lines:
-        if line == begin:
-            capturing = True
-            continue
-        if capturing:
-            result.append(line)
-
-    return '\n'.join(result).rstrip()
-
-
-async def _peek_on_pane_py(p: str, code: str, wait: float, poll: str = None, poll_timeout: float = 30.0) -> str:
-    """Peek helper for Python on a single pane."""
-    check_deny(code, "python")
+async def _read_after_on_pane(p: str, code: str, lang: str, read_after: float,
+                              fkw: dict, tail: int, head: int) -> str:
+    """Send code, sleep, capture from begin marker. No end marker — used for
+    prompt-changing commands (entering REPL, ssh, exit) where marker pairs
+    don't survive prompt changes.
+    """
+    if not check_session(p):
+        return f"{p}: not found (skipped)"
+    check_deny(code, lang)
+    if lang == "shell":
+        _check_not_python(p)
     lock = acquire_pane_lock(p)
-    lock_held = True
     try:
         begin, _ = generate_marker()
         run_tmux_cmd(["send-keys", "-t", p, "-X", "cancel"], capture=False)
-        run_tmux_cmd(["send-keys", "-t", p, f'print("{begin}")'], capture=False)
-        run_tmux_cmd(["send-keys", "-t", p, "Enter"], capture=False)
-        for line in code.split('\n'):
-            run_tmux_cmd(["send-keys", "-t", p, line], capture=False)
+        if lang == "python":
+            run_tmux_cmd(["send-keys", "-t", p, f'print("{begin}")'], capture=False)
             run_tmux_cmd(["send-keys", "-t", p, "Enter"], capture=False)
-        if poll:
-            lock.release()
-            lock_held = False
-            return await _poll_for_pattern(p, poll, poll_timeout)
-        return await peek_output(p, begin, wait)
-    finally:
-        if lock_held:
-            lock.release()
-
-
-async def _peek_on_pane_tcl(p: str, code: str, wait: float, poll: str = None, poll_timeout: float = 30.0) -> str:
-    """Peek helper for TCL on a single pane."""
-    check_deny(code, "tcl")
-    lock = acquire_pane_lock(p)
-    lock_held = True
-    try:
-        begin, _ = generate_marker()
-        run_tmux_cmd(["send-keys", "-t", p, "-X", "cancel"], capture=False)
-        run_tmux_cmd(["send-keys", "-t", p, f'puts "{begin}"'], capture=False)
-        run_tmux_cmd(["send-keys", "-t", p, "Enter"], capture=False)
-        run_tmux_cmd(["send-keys", "-t", p, code], capture=False)
-        run_tmux_cmd(["send-keys", "-t", p, "Enter"], capture=False)
-        if poll:
-            lock.release()
-            lock_held = False
-            return await _poll_for_pattern(p, poll, poll_timeout)
-        return await peek_output(p, begin, wait)
-    finally:
-        if lock_held:
-            lock.release()
-
-
-async def _peek_on_pane_sh(p: str, code: str, wait: float, poll: str = None, poll_timeout: float = 30.0) -> str:
-    """Peek helper for shell on a single pane."""
-    check_deny(code, "shell")
-    lock = acquire_pane_lock(p)
-    lock_held = True
-    try:
-        begin, _ = generate_marker()
-        run_tmux_cmd(["send-keys", "-t", p, "-X", "cancel"], capture=False)
-        run_tmux_cmd(["send-keys", "-t", p, f"echo '{begin}'"], capture=False)
-        run_tmux_cmd(["send-keys", "-t", p, "Enter"], capture=False)
-        for line in code.split('\n'):
-            run_tmux_cmd(["send-keys", "-t", p, line], capture=False)
+            for line in code.split('\n'):
+                run_tmux_cmd(["send-keys", "-t", p, line], capture=False)
+                run_tmux_cmd(["send-keys", "-t", p, "Enter"], capture=False)
+        elif lang == "tcl":
+            run_tmux_cmd(["send-keys", "-t", p, f'puts "{begin}"'], capture=False)
             run_tmux_cmd(["send-keys", "-t", p, "Enter"], capture=False)
-        if poll:
-            lock.release()
-            lock_held = False
-            return await _poll_for_pattern(p, poll, poll_timeout)
-        return await peek_output(p, begin, wait)
+            run_tmux_cmd(["send-keys", "-t", p, code], capture=False)
+            run_tmux_cmd(["send-keys", "-t", p, "Enter"], capture=False)
+        else:
+            run_tmux_cmd(["send-keys", "-t", p, f"echo '{begin}'"], capture=False)
+            run_tmux_cmd(["send-keys", "-t", p, "Enter"], capture=False)
+            for line in code.split('\n'):
+                run_tmux_cmd(["send-keys", "-t", p, line], capture=False)
+                run_tmux_cmd(["send-keys", "-t", p, "Enter"], capture=False)
+
+        await asyncio.sleep(min(read_after, _BLOCKING_TIMEOUT_MAX))
+
+        for n_lines in [1000, 4000, 16000]:
+            raw = run_tmux_cmd(["capture-pane", "-t", p, "-p", "-J", "-S", f"-{n_lines}"])
+            if begin in raw:
+                break
+        else:
+            raw = run_tmux_cmd(["capture-pane", "-t", p, "-p", "-J", "-S", "-"])
+
+        lines_full = _split_capture(raw)
+        result: list[str] = []
+        capturing = False
+        for line in lines_full:
+            if line == begin:
+                capturing = True
+                continue
+            if capturing:
+                result.append(line)
+
+        if head is not None and head > 0:
+            result = result[:head]
+        elif tail > 0 and len(result) > tail:
+            result = result[-tail:]
+        return apply_output_filters(result, n_negative=False, **fkw)
     finally:
-        if lock_held:
-            lock.release()
+        lock.release()
 
 
-async def _peek_multi(target_panes: list[str], code: str, wait: float, peek_fn, codes: list[str] = None, poll: str = None, poll_timeout: float = 30.0) -> str:
-    """Run peek on multiple panes concurrently and return grouped result."""
+async def _read_after_multi(target_panes: list[str], code: str, lang: str,
+                            read_after: float, fkw: dict, tail: int, head: int,
+                            codes: list[str] = None) -> str:
+    """Run read-after on multiple panes concurrently and return grouped result."""
     results = {}
     coros = {}
     for i, p in enumerate(target_panes):
@@ -2217,81 +2100,12 @@ async def _peek_multi(target_panes: list[str], code: str, wait: float, peek_fn, 
             results[p] = "not found (skipped)"
         else:
             c = codes[i] if codes else code
-            coros[p] = peek_fn(p, c, wait, poll, poll_timeout)
+            coros[p] = _read_after_on_pane(p, c, lang, read_after, fkw, tail, head)
     if coros:
         results_list = await asyncio.gather(*coros.values(), return_exceptions=True)
         for p, result in zip(coros.keys(), results_list):
             results[p] = str(result) if isinstance(result, BaseException) else result
     return _format_multi_result(results)
-
-
-@mcp.tool()
-async def xpy_peek(
-    pane: str = None,
-    code: str = "",
-    codes: list[str] = None,
-    wait: float = 1.0,
-    panes: list[str] = None,
-    poll: str = Field(None, description="If set, wait until this regex appears in new output instead of using fixed wait"),
-    poll_timeout: float = Field(30.0, description="Max seconds to wait for poll pattern"),
-) -> str:
-    """Execute Python code and capture output for a short time (no end marker wait)."""
-    target_panes = _resolve_panes(pane, panes)
-    _validate_multi(code, codes, "codes", target_panes)
-    if target_panes is not None:
-        return await _peek_multi(target_panes, code, wait, _peek_on_pane_py, codes=codes, poll=poll, poll_timeout=poll_timeout)
-
-    check_pane_registered(pane)
-    if not check_session(pane):
-        raise ValueError(f"Pane '{pane}' not found in tmux")
-    return await _peek_on_pane_py(pane, code, wait, poll=poll, poll_timeout=poll_timeout)
-
-
-@mcp.tool()
-async def xtcl_peek(
-    pane: str = None,
-    code: str = "",
-    codes: list[str] = None,
-    wait: float = 1.0,
-    panes: list[str] = None,
-    poll: str = Field(None, description="If set, wait until this regex appears in new output instead of using fixed wait"),
-    poll_timeout: float = Field(30.0, description="Max seconds to wait for poll pattern"),
-) -> str:
-    """Execute TCL code and capture output for a short time (no end marker wait)."""
-    target_panes = _resolve_panes(pane, panes)
-    _validate_multi(code, codes, "codes", target_panes)
-    if target_panes is not None:
-        return await _peek_multi(target_panes, code, wait, _peek_on_pane_tcl, codes=codes, poll=poll, poll_timeout=poll_timeout)
-
-    check_pane_registered(pane)
-    if not check_session(pane):
-        raise ValueError(f"Pane '{pane}' not found in tmux")
-    return await _peek_on_pane_tcl(pane, code, wait, poll=poll, poll_timeout=poll_timeout)
-
-
-@mcp.tool()
-async def xsh_peek(
-    pane: str = None,
-    code: str = "",
-    codes: list[str] = None,
-    wait: float = 1.0,
-    panes: list[str] = None,
-    poll: str = Field(None, description="If set, wait until this regex appears in new output instead of using fixed wait"),
-    poll_timeout: float = Field(30.0, description="Max seconds to wait for poll pattern"),
-) -> str:
-    """Execute shell command and capture output for a short time (no end marker wait)."""
-    target_panes = _resolve_panes(pane, panes)
-    _validate_multi(code, codes, "codes", target_panes)
-    if target_panes is not None:
-        for p in target_panes:
-            _check_not_python(p)
-        return await _peek_multi(target_panes, code, wait, _peek_on_pane_sh, codes=codes, poll=poll, poll_timeout=poll_timeout)
-
-    check_pane_registered(pane)
-    _check_not_python(pane)
-    if not check_session(pane):
-        raise ValueError(f"Pane '{pane}' not found in tmux")
-    return await _peek_on_pane_sh(pane, code, wait, poll=poll, poll_timeout=poll_timeout)
 
 
 @mcp.tool()
@@ -2459,6 +2273,9 @@ def task_cancel_all() -> str:
 
 
 def main():
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "watch":
+        sys.exit(_cli_watch(sys.argv[2:]))
     # Strip .venv from PATH so tmux panes don't inherit virtualenv pollution
     os.environ["PATH"] = ":".join(
         p for p in os.environ.get("PATH", "").split(":") if "/.venv/" not in p

@@ -8,17 +8,42 @@ Not a sandboxed subprocess — commands have real consequences in the user's env
 1. TOOL SELECTION
 ==========
 
-┌─ Start interpreter or enter remote shell (python3, ssh, kubectl exec, etc.)
-│   └─→ xsh_peek / xpy_peek / xtcl_peek
-│       wait=1~2 seconds
-│       Prompt changes (enter or exit) → xsh end markers break. Always peek.
+┌─ Run a command (any duration)
+│   └─→ xsh / xpy / xtcl (default mode)
+│       Default timeout=3s (capped at 60s). Marker-pair detection.
+│       Completes within timeout → output returned.
+│       Exceeds timeout → auto-promotes to background task; returned message
+│         contains task_id and the process keeps running.
+│       For known-slow commands (EDA TCL, training, big builds) override:
+│         xtcl(pane, code, timeout=60)
 │
-├─ Run short command (wait for completion)
-│   └─→ xsh / xpy / xtcl (blocking)
+├─ Enter or exit an interpreter / remote shell (prompt changes)
+│   └─→ xsh / xpy / xtcl with read_after=N
+│       Skips end-marker detection. Sends code, sleeps N seconds, returns
+│       the pane capture from the begin marker.
+│       Use whenever the prompt changes — markers don't survive prompt change.
+│         xsh(pane, "python3", read_after=2)        # enter Python REPL
+│         xpy(pane, "exit()", read_after=1)         # exit Python REPL
+│         xsh(pane, "ssh server", read_after=2)     # enter remote shell
 │
-├─ Run long task (need monitoring)
-│   └─→ xsh_start / xpy_start / xtcl_start (non-blocking)
-│       then task_status / task_output / task_wait
+├─ Wait for an already-promoted task to finish
+│   └─→ task_wait(task_id)
+│       Returns a shell command string. Pass it to Monitor (Claude Code's
+│       built-in tool) to get a chat notification when the task completes.
+│       After the notification, call task_output(task_id) for the body.
+│
+├─ Wait for specific output to appear (no task_id)
+│   └─→ poll_pane(pane, pattern, fresh=True|False)
+│       Returns a shell command string. Pass it to Monitor; you get a
+│       "[match] <line>" notification when the pattern first appears.
+│       fresh=True (default): ignores pre-existing content
+│       fresh=False: also matches pre-existing content
+│
+│       fresh rule:
+│         After respawn_pane(cmd=) / create_session(cmd=) → fresh=False
+│           cmd= starts process before poll_pane runs → output already on screen
+│         After read_after / send_text → fresh=True (default)
+│           output arrives after poll_pane snapshot is taken
 │
 ├─ Respond to prompt (password, yes/no)
 │   └─→ send_text (plain text, sends Enter by default)
@@ -33,17 +58,6 @@ Not a sandboxed subprocess — commands have real consequences in the user's env
 ├─ Check current screen
 │   └─→ capture_pane
 │
-├─ Wait for specific output to appear (no task_id)
-│   └─→ poll_pane (blocks until pattern matched or timeout)
-│       fresh=True (default): ignores pre-existing content
-│       fresh=False: also matches pre-existing content
-│
-│       fresh rule:
-│         After respawn_pane(cmd=) / create_session(cmd=) → fresh=False
-│           cmd= starts process before poll_pane runs → output already on screen
-│         After xsh_peek / send_text → fresh=True (default)
-│           output arrives after poll_pane starts watching
-│
 └─ Check sessions, processes, GPU memory
     └─→ ls (compact overview), ls(session=, gpu=True) (detailed + GPU)
 
@@ -51,47 +65,48 @@ Not a sandboxed subprocess — commands have real consequences in the user's env
 2. COMMON PATTERNS
 ==========
 
-Starting an interpreter and running code:
-    xsh_peek(pane, "python3", wait=1)      # start interpreter
-    xpy(pane, "print('hello')")            # run code (blocking)
-    xpy_peek(pane, "exit()", wait=1)       # exit interpreter
+Quick interactive command (returns output directly):
+    xsh(pane, "python3", read_after=2)
+    xpy(pane, "print(1+1)")           # 3s default — fast enough
+    xpy(pane, "exit()", read_after=1)
 
-Starting a long-running script:
-    xsh_peek(pane, "python3", wait=1)      # start interpreter first
-    xpy_start(pane, file="train.py")       # returns task_id for monitoring
+Long-running command — auto-promoted, then watched via Monitor:
+    xsh(pane, "python3", read_after=2)
+    result = xpy(pane, file="train.py")
+    # If train.py finishes in 3s → result is the output.
+    # If not → result contains task_id (e.g. "T1a2b_3c4d").
+    cmd = task_wait(task_id="T1a2b_3c4d")
+    Monitor(command=cmd, description="train.py done", timeout_ms=3600000)
+    # Continue with other work; notification arrives in chat when it finishes.
+    # On notification:
+    task_output(task_id="T1a2b_3c4d")     # full body
 
-Waiting for long-running tasks:
-    task_id = xpy_start(pane, file="train.py")
-    task_wait(task_id=task_id, timeout=300)
+Forcing a longer wait inline (skip Monitor flow):
+    xtcl(pane, "place_design", timeout=60)   # waits up to 60s, still auto-promotes if exceeded
 
-    # Multiple parallel tasks:
-    task_wait(task_ids=[id1, id2], race=True, timeout=300)
-    # race=True: returns when first task completes
-
-    # capture_pane polling loop is an anti-pattern when task_id exists.
-    # task_wait with timeout replaces repeated capture_pane calls.
-
-Waiting for specific output (no task_id):
-    xsh_peek(pane, "make build", wait=1)
-    poll_pane(pane, pattern="Build complete|ERROR", timeout=120)
-    # fresh=True (default): only matches NEW output after poll_pane is called
-    # if the pattern already exists in pane before the call, it is IGNORED
+Waiting for a specific pattern (any pane):
+    xsh(pane, "make build", read_after=1)
+    cmd = poll_pane(pane=pane, pattern="Build complete|ERROR")
+    Monitor(command=cmd, description="build outcome", timeout_ms=600000)
+    # Notification "[match] <line>" tells you which fired.
 
 After respawn/create with cmd= (process starts immediately):
     respawn_pane(pane, cmd="python3")
-    poll_pane(pane, pattern=">>>", fresh=False)
-    # cmd= starts python3 before poll_pane runs → ">>>" already on screen
-    # fresh=True here would timeout (ignores the already-printed ">>>")
+    cmd = poll_pane(pane=pane, pattern=">>>", fresh=False)
+    Monitor(command=cmd, ...)
+    # cmd= starts python3 before poll_pane runs → ">>>" is already on screen.
+    # fresh=True here would never match (snapshot would already include ">>>").
 
 Entering a remote shell:
-    xsh_peek(pane, "mlx2", wait=2)         # kubectl exec, ssh, docker exec
-    xsh(pane, "hostname")                  # commands inside remote shell
-    xsh_peek(pane, "exit", wait=1)         # return to local shell
+    xsh(pane, "mlx2", read_after=2)         # kubectl exec, ssh, docker exec
+    xsh(pane, "hostname")                   # commands inside remote shell
+    xsh(pane, "exit", read_after=1)         # return to local shell
 
 Passing variables from REPL to script (globals trick):
     xpy(pane, "model_path = '/path/to/model'")
-    xpy_start(pane, file="train.py")       # script accesses via globals().get('model_path', None)
+    xpy(pane, file="train.py")              # script accesses via globals().get('model_path', None)
     # file= uses exec() which shares REPL's globals()
+    # If train.py is long, this call auto-promotes — same Monitor flow as above.
 
 Setting up parallel workspaces:
     create_session("exp", windows=["a", "b", "c"], cmd="python3")
@@ -124,7 +139,13 @@ Same code to all:
 Different code per pane:
     xpy(panes=["t1:a.0", "t1:b.0"], codes=["x=1; print(x)", "x=2; print(x)"])
 
-Works with all 9 tools: xpy/xtcl/xsh, xpy_start/xtcl_start/xsh_start, xpy_peek/xtcl_peek/xsh_peek.
+Per-pane outcome (default mode): each pane independently either returns output
+or promotes to a task. The aggregated result lists output for finished panes
+and task_id for promoted ones — call task_wait per task_id for any that are
+still running.
+
+read_after mode also works with panes= — same N-second wait per pane, all
+captured concurrently.
 
 code and codes are mutually exclusive. cmd and cmds are mutually exclusive.
 codes/cmds length must match target count.
@@ -133,14 +154,14 @@ codes/cmds length must match target count.
 5. CODE LIMITATIONS
 ==========
 
-Python (xpy/xpy_start/xpy_peek): literal \n in code is OK (base64 encoding).
-TCL (xtcl/xtcl_start/xtcl_peek): literal \n still breaks injection.
+Python (xpy): literal \n in code is OK (base64 encoding).
+TCL (xtcl): literal \n still breaks injection.
 
 All tools use exec(). Bare expressions produce no output. file= also uses exec().
     xpy(pane, "x") → empty. Use print(x).
 
 file= path is resolved relative to the client's (agent's) working directory, not the tmux pane's cwd.
-    xpy_start(pane, file="train.py")  # resolves to /home/user/project/train.py if agent cwd is /home/user/project
+    xpy(pane, file="train.py")  # resolves to /home/user/project/train.py if agent cwd is /home/user/project
     # The pane's cwd is irrelevant for file= resolution.
 
 Do not use import/reload in REPL. Use file= instead.
@@ -172,42 +193,45 @@ grep does NOT expand the capture range. To search deeper scrollback, increase ta
 Pane state is tracked in memory. capture_pane is not called before every command.
 
 State changes to remember:
-- xsh_peek(pane, "python3") → pane is now Python REPL (>>>)
-- xpy_peek(pane, "exit()") → pane is now bash ($)
-- xsh_peek(pane, "openroad") → pane is now TCL (%)
-- xtcl_peek(pane, "exit") → pane is now bash ($)
+- xsh(pane, "python3", read_after=2) → pane is now Python REPL (>>>)
+- xpy(pane, "exit()", read_after=1) → pane is now bash ($)
+- xsh(pane, "openroad", read_after=2) → pane is now TCL (%)
+- xtcl(pane, "exit", read_after=1) → pane is now bash ($)
 - send_keys("C-c C-c") → uncertain, capture_pane to confirm
 - respawn_pane(pane) → pane is now bash ($), all tasks cleaned
 
 capture_pane is used when:
 - First time accessing a pane in this conversation
 - After Ctrl+C interrupt (state uncertain)
-- After abort/timeout from blocking tools (use task_list to find converted task)
 
-capture_pane is NOT for polling task progress.
-When task_id exists (from xpy_start/xsh_start/xtcl_start), use task_wait.
+For task progress, use task_status / task_output (not capture_pane).
 
 ==========
-8. ABORT/TIMEOUT BEHAVIOR
+8. TIMEOUT AND CANCELLATION
 ==========
 
 All x* tools send code to tmux before waiting for output.
 Any interruption — timeout, abort, user reject, cancel — means code was already sent.
-After interruption: capture_pane first. Do not send another command until pane state is confirmed.
 
-Timeout behavior:
-    Blocking tools (xsh/xpy/xtcl) return [timeout] on timeout — no task created.
-    Process may still be running in tmux. Use xsh_start next time for long-running commands.
+Timeout (default 3s, exceeded):
+    Tool returns "[task] T... — did not finish in Ns. task_wait(...) ..."
+    The task is registered automatically; no extra steps needed.
+    Use task_wait(task_id) → Monitor for completion notification.
 
-User cancellation (CancelledError) auto-converts to background task.
-After cancellation: task_list() to find the converted task, then task_wait/task_output.
+User cancellation (CancelledError):
+    Auto-converts to background task, same as timeout.
+    task_list() to find the converted task.
 
-Exit commands produce no end marker. Use peek for exit:
-    xtcl_peek(pane, "exit", wait=1)
+Long EDA / training / build commands:
+    Override timeout up to 60s if you genuinely want to wait inline:
+        xtcl(pane, "place_design", timeout=60)
+    Beyond 60s the cap forces auto-promotion regardless. Use task_wait + Monitor.
 
-task_wait returning [error]:
-    Pane died during task execution (crash, kill, etc.).
-    task_output(task_id) shows the exact tmux error reason.
+Exit commands produce no end marker. Use read_after for exit:
+    xtcl(pane, "exit", read_after=1)
+
+Pane death during task:
+    task_output(task_id) shows the tmux error reason.
     Recovery: ls() to check pane state → if alive, reuse directly.
 
 task_cancel removes tracking only — execution in tmux continues.
