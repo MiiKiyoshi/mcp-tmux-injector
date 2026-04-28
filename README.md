@@ -8,16 +8,25 @@ CLI agents like Claude Code run in their own process. They can't natively intera
 
 ## Features
 
-- **3 execution modes × 3 languages = 9 tools**
+- **3 unified tools — `xsh` / `xpy` / `xtcl`**
 
-|          | blocking   | background   | peek        |
-|----------|------------|--------------|-------------|
-| Python   | `xpy`      | `xpy_start`  | `xpy_peek`  |
-| TCL      | `xtcl`     | `xtcl_start` | `xtcl_peek` |
-| Shell    | `xsh`      | `xsh_start`  | `xsh_peek`  |
+  Each one has two modes selected by parameter:
 
+  - **default mode** (no `read_after`): wait briefly for the command's end
+    marker (default 3s, capped at 60s). If the command exceeds the timeout,
+    it auto-promotes to a background task and returns a `task_id`.
+  - **read_after mode** (`read_after=N`): no marker detection — send the
+    code, sleep N seconds, return the pane capture from the begin marker.
+    Use for prompt-changing commands (entering/exiting REPL, ssh, etc.)
+    where end-marker pairing breaks.
+
+  Single API, no `*_start` or `*_peek` variants.
+
+- **Async completion via Monitor** — `task_wait(task_id)` returns a shell
+  command. Pass it to Claude Code's `Monitor` tool; you get a chat
+  notification when the task completes. Same pattern for `poll_pane(pattern)`.
 - **Pane state tracking** — lock prevents parallel injection into the same pane
-- **Task monitoring** — `task_wait`, `task_output`, `task_status` for background jobs
+- **Task management** — `task_output`, `task_status`, `task_list`, `task_cancel`
 - **Output filtering** — built-in grep, tail, head per tool call
 - **Session management** — `create_session`, `create_window`, `respawn_pane`
 - **Multi-pane dispatch** — send the same (or different) code to multiple panes in parallel
@@ -65,10 +74,14 @@ create_session("work", windows=["train", "eval"])
 **Run a script in the background and get notified on completion**
 
 ```
-"Run train.py in the background and let me know when it's done"
+"Run train.py and let me know when it's done"
 ```
 
-The agent uses `xsh_peek` to start Python, `xpy_start` to launch the script, and `task_wait` to notify on completion.
+The agent calls `xsh(pane, "python3", read_after=2)` to start Python, then
+`xpy(file="train.py")`. If the script exceeds the 3s timeout it auto-promotes
+to a task. The agent calls `task_wait(task_id)` to obtain a shell command and
+hands it to `Monitor` — Claude Code delivers a notification when the script
+finishes.
 
 **Parallel work across windows**
 
