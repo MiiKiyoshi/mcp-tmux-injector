@@ -52,10 +52,10 @@ pip install -e .
 
 ## Setup
 
-Stdio MCP server — any compliant client works. The commands below are Claude
-Code's CLI; for other clients (Cursor, Cline, Zed, …) follow their own
-"add stdio MCP server" docs and use `mcp-tmux-injector` (or the `uv run`
-form) as the launch command.
+Works with any MCP-compatible client. The commands below are Claude Code's
+CLI; for other clients (Cursor, Cline, Zed, …) follow their own "add MCP
+server" docs and use `mcp-tmux-injector` (or the `uv run` form) as the
+launch command.
 
 **Claude Code (user-global)**
 
@@ -84,17 +84,19 @@ set_pane("mysession:main.0", "description")
 create_session("work", windows=["train", "eval"])
 ```
 
-**Run a script in the background and get notified on completion**
+**Run a long-running script asynchronously**
 
 ```
 "Run train.py and let me know when it's done"
 ```
 
-The agent calls `xsh(pane, "python3", read_after=2)` to start Python, then
+The agent enters Python with `xsh(pane, "python3", read_after=2)`, then
 `xpy(pane, file="train.py")`. If the script exceeds the 3s timeout it
-auto-promotes to a task. The agent calls `task_wait(task_id)` to obtain a
-script path and hands it to `Monitor` — Claude Code delivers a notification
-when the script finishes.
+auto-promotes to a task. `task_wait(task_id)` returns a wrapper script
+that prints a one-line completion signal on stdout when run; the agent
+runs it through whatever subprocess primitive the client offers (in
+Claude Code, the `Monitor` tool surfaces the line as a chat
+notification). On signal, `task_output(task_id)` returns the full body.
 
 **Parallel work across windows**
 
@@ -104,10 +106,10 @@ when the script finishes.
 
 The agent dispatches to multiple panes simultaneously using `panes=` + `codes=`.
 
-**Monitor session status**
+**Check session state**
 
 ```
-"Check the current status of each pane in the work session"
+"Show the current status of each pane in the work session"
 ```
 
 `ls(session="work", gpu=True)` shows PID, process, cwd, and GPU memory per pane.
