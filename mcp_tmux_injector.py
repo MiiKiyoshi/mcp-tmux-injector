@@ -111,8 +111,15 @@ _PANES_PERSIST_FILE = Path.home() / ".config" / "mcp-tmux-injector" / "panes.jso
 # Directory for fingerprint snapshot files (used by Monitor-mode poll_pane)
 _FINGERPRINT_DIR = Path.home() / ".cache" / "mcp-tmux-injector" / "fingerprints"
 
-# Server source directory — used to build `uv run --directory ...` watch commands
+# Server source directory (kept for future use)
 _SERVER_DIR = Path(__file__).resolve().parent
+
+# Path to the mcp-tmux-injector entry point in the active venv.
+# The server runs through this venv's python, so the binary sits beside it.
+# Used directly in watch commands instead of `uv run --directory ...` to avoid
+# uv resolution overhead and shorten the command string the model sees.
+import sys as _sys
+_SERVER_BIN = str(Path(_sys.executable).parent / "mcp-tmux-injector")
 
 # Client cwd from roots/list (cached after first query)
 _client_cwd: str | None = None
@@ -952,11 +959,7 @@ async def _blocking_on_pane(p: str, code: str, send_fn, timeout: float, filter_k
         }
         converted = True
         threading.Thread(target=_watch_task_completion, args=(task_id,), daemon=True).start()
-        return (
-            f"[task] {task_id} on {p} — did not finish in {timeout}s.\n"
-            f"task_wait('{task_id}')   → Monitor command for completion notification\n"
-            f"task_output('{task_id}') → partial output now"
-        )
+        return f"[task promoted] {task_id} ({p}, {timeout}s)"
     except asyncio.CancelledError:
         _tasks[task_id] = {
             "pane": p, "begin": begin, "end": end,
@@ -1230,8 +1233,7 @@ def _check_end_marker(pane: str, end: str, tail: int = 200) -> bool:
 def _build_watch_cmd_task(task_id: str, pane: str, end: str) -> str:
     """Build a shell command to pass to Monitor for task completion watch."""
     return (
-        f"uv run --directory {shlex.quote(str(_SERVER_DIR))} "
-        f"mcp-tmux-injector watch task "
+        f"{shlex.quote(_SERVER_BIN)} watch task "
         f"--task-id {shlex.quote(task_id)} "
         f"--pane {shlex.quote(pane)} "
         f"--end {shlex.quote(end)}"
@@ -1242,8 +1244,7 @@ def _build_watch_cmd_pane(pane: str, pattern: str, fp_path: Path,
                           fp_total: int, fresh: bool, ignore_case: bool, literal: bool) -> str:
     """Build a shell command to pass to Monitor for pattern-match watch."""
     parts = [
-        f"uv run --directory {shlex.quote(str(_SERVER_DIR))}",
-        "mcp-tmux-injector watch pane",
+        f"{shlex.quote(_SERVER_BIN)} watch pane",
         f"--pane {shlex.quote(pane)}",
         f"--pattern {shlex.quote(pattern)}",
         f"--fingerprint-file {shlex.quote(str(fp_path))}",
