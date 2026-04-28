@@ -127,15 +127,24 @@ def _restore_panes():
         data = json.loads(_PANES_PERSIST_FILE.read_text())
     except (json.JSONDecodeError, OSError):
         return
+    import sys
     restored = 0
+    skipped = 0
     for pane, description in data.items():
+        try:
+            parse_pane_id(pane)
+        except ValueError:
+            print(f"Skipping malformed pane entry '{pane}'", file=sys.stderr)
+            skipped += 1
+            continue
         if check_session(pane):
             _working_panes[pane] = {"description": description, "owner": EXTERNAL}
             _auto_register_session_window(pane)
             restored += 1
     if restored:
-        import sys
         print(f"Restored {restored} pane(s) from {_PANES_PERSIST_FILE}", file=sys.stderr)
+    if skipped:
+        print(f"Skipped {skipped} malformed pane(s)", file=sys.stderr)
 
 
 async def _get_client_cwd(ctx: Context) -> str | None:
@@ -2050,6 +2059,10 @@ def kill_window(session: str, window: str, force: bool = Field(False, descriptio
 @mcp.tool()
 def set_pane(pane: str, description: str) -> str:
     """Register a pane for use. Re-calling updates description."""
+    try:
+        parse_pane_id(pane)
+    except ValueError:
+        raise ValueError(f"Invalid pane id '{pane}': expected 'session:window.idx' format")
     if not check_session(pane):
         raise ValueError(f"Pane '{pane}' not found in tmux")
 
