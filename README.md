@@ -52,6 +52,11 @@ pip install -e .
 
 ## Setup
 
+Stdio MCP server — any compliant client works. The commands below are Claude
+Code's CLI; for other clients (Cursor, Cline, Zed, …) follow their own
+"add stdio MCP server" docs and use `mcp-tmux-injector` (or the `uv run`
+form) as the launch command.
+
 **Claude Code (user-global)**
 
 After `pip install -e .` puts `mcp-tmux-injector` on PATH:
