@@ -84,7 +84,7 @@ set_pane("mysession:main.0", "description")
 create_session("work", windows=["train", "eval"])
 ```
 
-**Run a long-running script asynchronously**
+**Run a script in the background and get notified on completion**
 
 ```
 "Run train.py and let me know when it's done"
