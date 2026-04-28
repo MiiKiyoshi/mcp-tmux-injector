@@ -28,14 +28,14 @@ Not a sandboxed subprocess — commands have real consequences in the user's env
 │
 ├─ Wait for an already-promoted task to finish
 │   └─→ task_wait(task_id)
-│       Returns a shell command string. Pass it to Monitor (Claude Code's
-│       built-in tool) to get a chat notification when the task completes.
-│       After the notification, call task_output(task_id) for the body.
+│       Returns a path to a self-deleting wrapper script. Pass it to Monitor
+│       (Claude Code's built-in tool) to get a chat notification when the task
+│       completes. After the notification, call task_output(task_id) for the body.
 │
 ├─ Wait for specific output to appear (no task_id)
 │   └─→ poll_pane(pane, pattern, only_new=True|False)
-│       Returns a shell command string. Pass it to Monitor; you get a
-│       "[match] <line>" notification when the pattern first appears.
+│       Returns a path to a self-deleting wrapper script. Pass it to Monitor;
+│       you get a "[match] <line>" notification when the pattern first appears.
 │       only_new=True (default): match only output that appears AFTER this call
 │       only_new=False: also match content already on screen
 │
@@ -67,7 +67,7 @@ Not a sandboxed subprocess — commands have real consequences in the user's env
 
 Quick interactive command (returns output directly):
     xsh(pane, "python3", read_after=2)
-    xpy(pane, "print(1+1)")           # 3s default — fast enough
+    xpy(pane, "print(1+1)")
     xpy(pane, "exit()", read_after=1)
 
 Long-running command — auto-promoted, then watched via Monitor:
@@ -84,11 +84,17 @@ Long-running command — auto-promoted, then watched via Monitor:
 Forcing a longer wait inline (skip Monitor flow):
     xtcl(pane, "place_design", timeout=60)   # waits up to 60s, still auto-promotes if exceeded
 
-Waiting for a specific pattern (any pane):
-    xsh(pane, "make build", read_after=1)
+Waiting for a pattern in an already-running task:
+    # Task is already running on the pane (e.g. xsh that auto-promoted, or
+    # something started in a prior step). The pattern hasn't appeared yet.
     cmd = poll_pane(pane=pane, pattern="Build complete|ERROR")
     Monitor(command=cmd, description="build outcome", timeout_ms=600000)
     # Notification "[match] <line>" tells you which fired.
+    #
+    # WARNING: only_new=True (default) snapshots NOW. Do NOT call poll_pane
+    # right after sending a quick command — if the pattern already arrived,
+    # it ends up inside the snapshot and is never matched. Only call once the
+    # producing task is confirmed running and the pattern is still pending.
 
 After respawn/create with cmd= (process starts immediately):
     respawn_pane(pane, cmd="python3")
@@ -154,10 +160,11 @@ codes/cmds length must match target count.
 5. CODE LIMITATIONS
 ==========
 
-Python (xpy): literal \n in code is OK (base64 encoding).
-TCL (xtcl): literal \n still breaks injection.
+Python (xpy): literal \n in code is OK — code is written to a temp file before exec().
+TCL (xtcl): literal \n breaks injection (single send-keys line).
+Shell (xsh): code runs inside a `{ ... }` block, line-by-line via send-keys.
 
-All tools use exec(). Bare expressions produce no output. file= also uses exec().
+xpy uses exec(). Bare expressions produce no output:
     xpy(pane, "x") → empty. Use print(x).
 
 file= path is resolved relative to the client's (agent's) working directory, not the tmux pane's cwd.
@@ -181,7 +188,7 @@ Semicolons work only for simple statements.
 tail= defines the visible window. grep= searches within that window.
     capture_pane(pane, tail=30)                    # last 30 lines
     capture_pane(pane, tail=30, grep="ERROR")      # last 30 lines, then grep
-    capture_pane(pane, grep="ERROR")               # last 100 lines (default), then grep
+    capture_pane(pane, grep="ERROR")               # last 5 lines (default), then grep
 
 grep does NOT expand the capture range. To search deeper scrollback, increase tail:
     capture_pane(pane, tail=4000, grep="FATAL")    # search last 4000 lines
@@ -197,7 +204,7 @@ State changes to remember:
 - xpy(pane, "exit()", read_after=1) → pane is now bash ($)
 - xsh(pane, "openroad", read_after=2) → pane is now TCL (%)
 - xtcl(pane, "exit", read_after=1) → pane is now bash ($)
-- send_keys("C-c C-c") → uncertain, capture_pane to confirm
+- send_keys(pane, "C-c C-c") → uncertain, capture_pane to confirm
 - respawn_pane(pane) → pane is now bash ($), all tasks cleaned
 
 capture_pane is used when:
@@ -214,7 +221,7 @@ All x* tools send code to tmux before waiting for output.
 Any interruption — timeout, abort, user reject, cancel — means code was already sent.
 
 Timeout (default 3s, exceeded):
-    Tool returns "[task] T... — did not finish in Ns. task_wait(...) ..."
+    Tool returns "[task promoted] T... (pane, Ns)".
     The task is registered automatically; no extra steps needed.
     Use task_wait(task_id) → Monitor for completion notification.
 

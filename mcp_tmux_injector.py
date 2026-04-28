@@ -1540,7 +1540,7 @@ def _find_fingerprint(lines: list[str], fingerprint: list[str]) -> int | None:
 
 
 def _build_fingerprint(p: str) -> tuple[list[str], int]:
-    """Snapshot current pane state for fresh-mode polling.
+    """Snapshot current pane state for only_new mode polling.
 
     Returns (fingerprint_lines, total_line_count).
     fingerprint_lines: last ≤50 stable (non-progress-bar) lines.
