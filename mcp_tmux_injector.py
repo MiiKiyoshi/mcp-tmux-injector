@@ -1241,7 +1241,7 @@ def _build_watch_cmd_task(task_id: str, pane: str, end: str) -> str:
 
 
 def _build_watch_cmd_pane(pane: str, pattern: str, fp_path: Path,
-                          fp_total: int, fresh: bool, ignore_case: bool, literal: bool) -> str:
+                          fp_total: int, only_new: bool, ignore_case: bool, literal: bool) -> str:
     """Build a shell command to pass to Monitor for pattern-match watch."""
     parts = [
         f"{shlex.quote(_SERVER_BIN)} watch pane",
@@ -1250,8 +1250,8 @@ def _build_watch_cmd_pane(pane: str, pattern: str, fp_path: Path,
         f"--fingerprint-file {shlex.quote(str(fp_path))}",
         f"--fingerprint-total {fp_total}",
     ]
-    if fresh:
-        parts.append("--fresh")
+    if only_new:
+        parts.append("--only-new")
     if ignore_case:
         parts.append("-i")
     if literal:
@@ -1282,14 +1282,14 @@ def _cli_watch_task(pane: str, end: str, task_id: str) -> int:
 
 
 def _cli_watch_pane(pane: str, pattern: str, fp_path: Path, fp_total: int,
-                    fresh: bool, ignore_case: bool, literal: bool) -> int:
+                    only_new: bool, ignore_case: bool, literal: bool) -> int:
     """Watch CLI: poll for pattern. Print first matching line and exit."""
     flags = re.IGNORECASE if ignore_case else 0
     pat = re.escape(pattern) if literal else pattern
     regex = re.compile(pat, flags)
 
     fp_lines: list[str] = []
-    if fresh and fp_path.exists():
+    if only_new and fp_path.exists():
         fp_lines = json.loads(fp_path.read_text()).get("lines", [])
 
     interval = 0.5
@@ -1299,7 +1299,7 @@ def _cli_watch_pane(pane: str, pattern: str, fp_path: Path, fp_total: int,
             try:
                 raw = run_tmux_cmd(["capture-pane", "-t", pane, "-p", "-J", "-S", "-200"], raise_on_error=True)
                 lines = _split_capture(raw)
-                search = _get_fresh_lines(lines, fp_lines, fp_total) if fresh else lines
+                search = _get_fresh_lines(lines, fp_lines, fp_total) if only_new else lines
                 for line in search:
                     if regex.search(line):
                         print(f"[match] {line}", flush=True)
@@ -1332,7 +1332,7 @@ def _cli_watch(args: list[str]) -> int:
     pp.add_argument("--pattern", required=True)
     pp.add_argument("--fingerprint-file", required=True)
     pp.add_argument("--fingerprint-total", type=int, default=0)
-    pp.add_argument("--fresh", action="store_true")
+    pp.add_argument("--only-new", action="store_true")
     pp.add_argument("-i", dest="ignore_case", action="store_true")
     pp.add_argument("-F", dest="literal", action="store_true")
 
@@ -1341,7 +1341,7 @@ def _cli_watch(args: list[str]) -> int:
         return _cli_watch_task(ns.pane, ns.end, ns.task_id)
     return _cli_watch_pane(
         ns.pane, ns.pattern, Path(ns.fingerprint_file),
-        ns.fingerprint_total, ns.fresh, ns.ignore_case, ns.literal,
+        ns.fingerprint_total, ns.only_new, ns.ignore_case, ns.literal,
     )
 
 
@@ -1598,7 +1598,7 @@ def _get_fresh_lines(lines: list[str], fingerprint: list[str], fingerprint_total
 def poll_pane(
     pane: str,
     pattern: str,
-    fresh: bool = Field(True, description="True (default): ignore pre-existing content — use after read_after/send_text. False: match pre-existing — required after respawn_pane(cmd=) or create_session(cmd=)"),
+    only_new: bool = Field(True, description="True (default): match only output produced AFTER this call (fingerprint snapshot taken NOW). False: also match pre-existing content — required after respawn_pane(cmd=) / create_session(cmd=) where the trigger ran before poll_pane."),
     i: bool = Field(False, description="case insensitive match"),
     F: bool = Field(False, description="literal string, not regex"),
 ) -> str:
@@ -1608,9 +1608,9 @@ def poll_pane(
     runs it in the background; when the pattern first appears in the pane,
     Monitor delivers a notification line of the form '[match] <line>'.
 
-    fresh=True (default): only matches output produced AFTER this call. The
+    only_new=True (default): only matches output produced AFTER this call. The
     fingerprint snapshot is taken NOW.
-    fresh=False: also matches pre-existing content.
+    only_new=False: also matches pre-existing content.
 
     For multi-pane race, spawn multiple Monitors with separate poll_pane calls.
     """
@@ -1620,12 +1620,12 @@ def poll_pane(
     if not check_session(pane):
         raise ValueError(f"Pane '{pane}' not found in tmux")
 
-    fp_lines, fp_total = _build_fingerprint(pane) if fresh else ([], 0)
+    fp_lines, fp_total = _build_fingerprint(pane) if only_new else ([], 0)
     _FINGERPRINT_DIR.mkdir(parents=True, exist_ok=True)
     fp_path = _FINGERPRINT_DIR / f"fp_{int(time.time()*1000)}_{random.randint(0, 0xFFFF):04x}.json"
     fp_path.write_text(json.dumps({"lines": fp_lines, "total": fp_total}))
 
-    return _build_watch_cmd_pane(pane, pattern, fp_path, fp_total, fresh, i, F)
+    return _build_watch_cmd_pane(pane, pattern, fp_path, fp_total, only_new, i, F)
 
 
 @mcp.tool()
