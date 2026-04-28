@@ -33,16 +33,16 @@ Not a sandboxed subprocess — commands have real consequences in the user's env
 │       After the notification, call task_output(task_id) for the body.
 │
 ├─ Wait for specific output to appear (no task_id)
-│   └─→ poll_pane(pane, pattern, fresh=True|False)
+│   └─→ poll_pane(pane, pattern, only_new=True|False)
 │       Returns a shell command string. Pass it to Monitor; you get a
 │       "[match] <line>" notification when the pattern first appears.
-│       fresh=True (default): ignores pre-existing content
-│       fresh=False: also matches pre-existing content
+│       only_new=True (default): match only output that appears AFTER this call
+│       only_new=False: also match content already on screen
 │
-│       fresh rule:
-│         After respawn_pane(cmd=) / create_session(cmd=) → fresh=False
+│       only_new rule:
+│         After respawn_pane(cmd=) / create_session(cmd=) → only_new=False
 │           cmd= starts process before poll_pane runs → output already on screen
-│         After read_after / send_text → fresh=True (default)
+│         After read_after / send_text → only_new=True (default)
 │           output arrives after poll_pane snapshot is taken
 │
 ├─ Respond to prompt (password, yes/no)
@@ -92,10 +92,10 @@ Waiting for a specific pattern (any pane):
 
 After respawn/create with cmd= (process starts immediately):
     respawn_pane(pane, cmd="python3")
-    cmd = poll_pane(pane=pane, pattern=">>>", fresh=False)
+    cmd = poll_pane(pane=pane, pattern=">>>", only_new=False)
     Monitor(command=cmd, ...)
     # cmd= starts python3 before poll_pane runs → ">>>" is already on screen.
-    # fresh=True here would never match (snapshot would already include ">>>").
+    # only_new=True here would never match (snapshot would already include ">>>").
 
 Entering a remote shell:
     xsh(pane, "mlx2", read_after=2)         # kubectl exec, ssh, docker exec
