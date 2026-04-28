@@ -22,12 +22,12 @@ CLI agents like Claude Code run in their own process. They can't natively intera
 
   Single API, no `*_start` or `*_peek` variants.
 
-- **Async completion via Monitor** — `task_wait(task_id)` returns a short
-  path (~30 chars) to a self-deleting wrapper script. Pass it to Claude
-  Code's `Monitor` tool to get a chat notification when the task
-  completes. The watch CLI invocation, fingerprint paths, and flags stay
-  inside the script — the model only ever sees the path. Same pattern for
-  `poll_pane(pattern)`.
+- **Async completion via Monitor** — `task_wait(task_id)` and `poll_pane(pattern)`
+  return a tiny script path. Pass it to Claude Code's `Monitor` tool to get a
+  chat notification on completion / first match.
+- **Save output to file** — `task_output` and `capture_pane` accept `save=path`
+  to dump filtered output for logging, with optional prefix/suffix and
+  markdown wrapping.
 - **Pane state tracking** — lock prevents parallel injection into the same pane
 - **Task management** — `task_output`, `task_status`, `task_list`, `task_cancel`
 - **Output filtering** — built-in grep, tail, head per tool call
