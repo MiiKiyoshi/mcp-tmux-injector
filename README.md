@@ -24,8 +24,8 @@ CLI agents like Claude Code run in their own process. They can't natively intera
   return a tiny script path. Pass it to Claude Code's `Monitor` tool to get a
   chat notification on completion / first match.
 - **Save output to file** — `task_output` and `capture_pane` accept `save=path`
-  to dump filtered output for logging, with optional prefix/suffix and
-  markdown wrapping.
+  to dump filtered output for logging, with optional `prefix`/`suffix`
+  (`task_output` also offers markdown code-fence wrapping).
 - **Pane state tracking** — lock prevents parallel injection into the same pane
 - **Task management** — `task_output`, `task_status`, `task_list`, `task_cancel`
 - **Output filtering** — built-in grep, tail, head per tool call
@@ -50,14 +50,17 @@ pip install -e .
 
 **Claude Code (user-global)**
 
+After `pip install -e .` puts `mcp-tmux-injector` on PATH:
+
 ```bash
 claude mcp add tmux-injector --scope user -- mcp-tmux-injector
 ```
 
-Or with `uv` (no install needed):
+Or run directly out of the repo with `uv` (no install of the binary needed):
 
 ```bash
-claude mcp add tmux-injector --scope user -- uvx mcp-tmux-injector
+claude mcp add tmux-injector --scope user -- \
+  uv run --directory /absolute/path/to/mcp-tmux-injector mcp-tmux-injector
 ```
 
 ## Usage
@@ -79,10 +82,10 @@ create_session("work", windows=["train", "eval"])
 ```
 
 The agent calls `xsh(pane, "python3", read_after=2)` to start Python, then
-`xpy(file="train.py")`. If the script exceeds the 3s timeout it auto-promotes
-to a task. The agent calls `task_wait(task_id)` to obtain a shell command and
-hands it to `Monitor` — Claude Code delivers a notification when the script
-finishes.
+`xpy(pane, file="train.py")`. If the script exceeds the 3s timeout it
+auto-promotes to a task. The agent calls `task_wait(task_id)` to obtain a
+script path and hands it to `Monitor` — Claude Code delivers a notification
+when the script finishes.
 
 **Parallel work across windows**
 
