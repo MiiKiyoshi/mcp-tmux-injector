@@ -20,9 +20,13 @@ CLI agents like Claude Code run in their own process. They can't natively intera
     Use for prompt-changing commands (entering/exiting REPL, ssh, etc.)
     where end-marker pairing breaks.
 
-- **Async completion via Monitor** — `task_wait(task_id)` and `poll_pane(pattern)`
-  return a tiny script path. Pass it to Claude Code's `Monitor` tool to get a
-  chat notification on completion / first match.
+- **Async completion via wrapper script** — `task_wait(task_id)` and
+  `poll_pane(pattern)` return a path to a self-deleting bash script that
+  blocks until the condition fires, then prints one line (`[done] task X`
+  or `[match] <line>`) on stdout and exits. In Claude Code, pass the path
+  to the `Monitor` tool for chat-notification ergonomics; with any other
+  MCP client, run the script through whatever subprocess primitive that
+  client offers.
 - **Save output to file** — `task_output` and `capture_pane` accept `save=path`
   to dump filtered output for logging, with optional `prefix`/`suffix`
   (`task_output` also offers markdown code-fence wrapping).

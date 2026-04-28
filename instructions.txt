@@ -28,14 +28,17 @@ Not a sandboxed subprocess — commands have real consequences in the user's env
 │
 ├─ Wait for an already-promoted task to finish
 │   └─→ task_wait(task_id)
-│       Returns a path to a self-deleting wrapper script. Pass it to Monitor
-│       (Claude Code's built-in tool) to get a chat notification when the task
-│       completes. After the notification, call task_output(task_id) for the body.
+│       Returns a path to a self-deleting wrapper script. The script blocks
+│       until the task ends, then prints "[done] task X" on stdout and exits.
+│       In Claude Code: pass the path to the Monitor tool for a chat
+│       notification. Other clients: run the script via any subprocess
+│       primitive. After completion, call task_output(task_id) for the body.
 │
 ├─ Wait for specific output to appear (no task_id)
 │   └─→ poll_pane(pane, pattern, only_new=True|False)
-│       Returns a path to a self-deleting wrapper script. Pass it to Monitor;
-│       you get a "[match] <line>" notification when the pattern first appears.
+│       Returns a path to a self-deleting wrapper script. The script blocks
+│       until the pattern matches, then prints "[match] <line>" and exits.
+│       In Claude Code: pass to Monitor. Other clients: any subprocess runner.
 │       only_new=True (default): match only output that appears AFTER this call
 │       only_new=False: also match content already on screen
 │
