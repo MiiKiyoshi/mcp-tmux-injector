@@ -1192,19 +1192,42 @@ def _check_end_marker(pane: str, end: str, tail: int = 200) -> bool:
     return any(line == end for line in _split_capture(raw))
 
 
+def _write_watch_script(inner_cmd: str, extra_cleanup: list[str] = None) -> str:
+    """Write a self-deleting bash wrapper that runs inner_cmd. Returns its path.
+
+    The wrapper traps EXIT (covers normal exit, SIGTERM from Monitor timeout,
+    pattern-match exits). On exit it removes itself plus any extra files.
+    """
+    suffix = f"{int(time.time()*1000):x}_{random.randint(0, 0xFFFF):04x}"
+    path = Path("/tmp") / f"tmix_w_{suffix}.sh"
+    targets = ['"$0"'] + [shlex.quote(p) for p in (extra_cleanup or [])]
+    cleanup = " ".join(targets)
+    content = (
+        "#!/bin/bash\n"
+        f"trap 'rm -f -- {cleanup}' EXIT\n"
+        f"{inner_cmd}\n"
+    )
+    path.write_text(content)
+    path.chmod(0o755)
+    return str(path)
+
+
 def _build_watch_cmd_task(task_id: str, pane: str, end: str) -> str:
-    """Build a shell command to pass to Monitor for task completion watch."""
-    return (
+    """Wrap the task watch invocation in a self-deleting script for Monitor."""
+    inner = (
         f"{shlex.quote(_SERVER_BIN)} watch task "
         f"--task-id {shlex.quote(task_id)} "
         f"--pane {shlex.quote(pane)} "
         f"--end {shlex.quote(end)}"
     )
+    return _write_watch_script(inner)
 
 
 def _build_watch_cmd_pane(pane: str, pattern: str, fp_path: Path,
                           fp_total: int, only_new: bool, ignore_case: bool, literal: bool) -> str:
-    """Build a shell command to pass to Monitor for pattern-match watch."""
+    """Wrap the pane watch invocation in a self-deleting script for Monitor.
+    Also cleans up the fingerprint file (the CLI also tries; trap is backstop).
+    """
     parts = [
         f"{shlex.quote(_SERVER_BIN)} watch pane",
         f"--pane {shlex.quote(pane)}",
@@ -1218,7 +1241,8 @@ def _build_watch_cmd_pane(pane: str, pattern: str, fp_path: Path,
         parts.append("-i")
     if literal:
         parts.append("-F")
-    return " ".join(parts)
+    inner = " ".join(parts)
+    return _write_watch_script(inner, extra_cleanup=[str(fp_path)])
 
 
 def _cli_watch_task(pane: str, end: str, task_id: str) -> int:
