@@ -20,8 +20,6 @@ CLI agents like Claude Code run in their own process. They can't natively intera
     Use for prompt-changing commands (entering/exiting REPL, ssh, etc.)
     where end-marker pairing breaks.
 
-  Single API, no `*_start` or `*_peek` variants.
-
 - **Async completion via Monitor** — `task_wait(task_id)` and `poll_pane(pattern)`
   return a tiny script path. Pass it to Claude Code's `Monitor` tool to get a
   chat notification on completion / first match.
