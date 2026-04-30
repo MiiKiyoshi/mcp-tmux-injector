@@ -1246,20 +1246,14 @@ def _build_watch_cmd_pane(pane: str, pattern: str, fp_path: Path,
 
 
 def _cli_watch_task(pane: str, end: str, task_id: str) -> int:
-    """Watch CLI: poll for end marker. Print one line and exit on completion or error signature."""
+    """Watch CLI: poll for end marker. Print one line and exit on completion."""
     interval = 0.5
     max_interval = 10.0
-    fail_pat = re.compile(r"Traceback|Killed|OOM|Segmentation fault")
     while True:
         try:
             if _check_end_marker(pane, end):
                 print(f"[done] task {task_id}", flush=True)
                 return 0
-            raw = run_tmux_cmd(["capture-pane", "-t", pane, "-p", "-J", "-S", "-200"], raise_on_error=True)
-            for line in _split_capture(raw):
-                if fail_pat.search(line):
-                    print(f"[fail] task {task_id}: {line}", flush=True)
-                    return 0
         except Exception as e:
             print(f"[error] task {task_id}: {e}", flush=True)
             return 1
