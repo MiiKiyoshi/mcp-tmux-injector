@@ -8,6 +8,12 @@ Not a sandboxed subprocess — commands have real consequences in the user's env
 1. TOOL SELECTION
 ==========
 
+┌─ Need a fresh workspace (REPL, build, benchmark)?
+│   └─→ create_session("<purpose>")   ALWAYS a new, dedicated session.
+│       NEVER host your work in a session you did not create this
+│       conversation. "Only one session exists" is NOT a reason to
+│       reuse it — make your own.
+│
 ┌─ Run a command (any duration)
 │   └─→ xsh / xpy / xtcl (default mode)
 │       Default timeout=3s (capped at 60s).
@@ -124,6 +130,11 @@ Panes must be registered before use.
     ls()
 
 "Pane not registered" error → ls() first, then re-register if needed.
+
+Registering a pane ≠ owning its session.
+set_pane lets you TALK to an existing pane. It does NOT authorize
+creating/killing windows in that pane's session. Host-session choice
+is a separate decision — see TOOL SELECTION top box.
 
 ==========
 4. MULTI-PANE OPERATIONS
@@ -254,6 +265,15 @@ external = set_pane()-registered. Origin opaque — user, a script, a prior
 Agent direct shell: no tmux new-session/kill-session/new-window/kill-window.
 Lifecycle via MCP tools. (Scripts invoking tmux internally are unaffected;
 their sessions surface as external on first set_pane().)
+
+STRUCTURE IS OFF-LIMITS ON SESSIONS YOU DIDN'T CREATE.
+create_window / kill_window are allowed ONLY in sessions you created
+via create_session this conversation (managed). For any external or
+untracked session, you may register + run commands in its EXISTING
+panes (if it's your task target), but NEVER add or remove windows.
+
+"attached" in ls = the user is actively in this session right now.
+Hardest read/run-only target: touch nothing structural.
 
 Reading an external label:
   - Name referenced in project workflow or current task → work target, proceed normally.
