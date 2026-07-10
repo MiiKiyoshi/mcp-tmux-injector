@@ -15,6 +15,7 @@ CLI agents can't natively talk to a live REPL or a long-running shell. This serv
 - **Save output to a file** — `task_output(save=path)` and `capture_pane(save=path)` write filtered output to disk.
 - **Per-pane locking** — only one injected command runs on a pane at a time.
 - **Multi-pane dispatch** — `panes=[…]` with either `code=` (same code to all) or `codes=[…]` (different code per pane).
+- **Works over ssh** — code travels as keystrokes only (Python code as a base64 `exec` one-liner, split so every line stays under the 4095-byte tty limit). A pane that is ssh'd into another machine, or running a REPL there, behaves the same as a local one. No shared filesystem is assumed.
 
 ## Requirements
 
@@ -96,6 +97,22 @@ Patterns use [fnmatch](https://docs.python.org/3/library/fnmatch.html) and match
 ## Tool reference
 
 See [instructions.txt](instructions.txt).
+
+## Code layout
+
+```
+mcp_tmux_injector/
+  config.py     deny-list, instructions, shared paths
+  tmux.py       tmux primitives (run, capture, sessions/windows)
+  codec.py      markers, code delivery (keystroke-only, ssh-safe), extraction
+  filters.py    output filtering (tqdm/grep/dedupe/save)
+  tasks.py      background task registry, pane locks
+  registry.py   pane/session registration, ownership, cleanup
+  watch_cli.py  standalone watch CLI + poll fingerprints
+  server.py     MCP tool definitions, entry point
+tests/
+  test_pure.py  pure-function tests (no tmux needed): .venv/bin/python tests/test_pure.py
+```
 
 ## License
 
