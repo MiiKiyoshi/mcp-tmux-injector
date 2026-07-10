@@ -15,7 +15,7 @@ CLI agents can't natively talk to a live REPL or a long-running shell. This serv
 - **Save output to a file** — `task_output(save=path)` and `capture_pane(save=path)` write filtered output to disk.
 - **Per-pane locking** — only one injected command runs on a pane at a time.
 - **Multi-pane dispatch** — `panes=[…]` with either `code=` (same code to all) or `codes=[…]` (different code per pane).
-- **Works over ssh** — code travels as keystrokes only (Python code as a base64 `exec` one-liner, split so every line stays under the 4095-byte tty limit). A pane that is ssh'd into another machine, or running a REPL there, behaves the same as a local one. No shared filesystem is assumed.
+- **Works over ssh** — a pane that is ssh'd into another machine, or running a REPL there, behaves the same as a local one. Code is delivered as keystrokes, so nothing needs to exist on the remote filesystem — `file=` included.
 
 ## Requirements
 
