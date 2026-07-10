@@ -106,7 +106,15 @@ After respawn/create with cmd= (process starts immediately):
 Entering a remote shell:
     xsh(pane, "mlx2", read_after=2)         # kubectl exec, ssh, docker exec
     xsh(pane, "hostname")                   # commands inside remote shell
+    xsh(pane, "python3", read_after=2)      # REPL on the remote host
+    xpy(pane, "print(1+1)")                 # xpy works there like a local REPL
+    xpy(pane, file="local_script.py")       # file content is embedded and sent
+    xpy(pane, "exit()", read_after=1)       # leave the remote REPL
     xsh(pane, "exit", read_after=1)         # return to local shell
+
+    Code travels as keystrokes only — no shared filesystem assumed, so
+    everything works identically on remote hosts. file= reads the LOCAL
+    path and embeds the content into the payload.
 
 Passing variables from REPL to script:
     xpy(pane, "model_path = '/path/to/model'")
@@ -164,17 +172,13 @@ codes/cmds length must match target count.
 5. CODE LIMITATIONS
 ==========
 
-xpy / xsh: multi-line code is OK.
+xpy / xsh: multi-line code is OK — including compound statements
+(for/if/while/def/class/with/try). Code is delivered as one payload,
+not typed line-by-line, so REPL continuation prompts are never an issue.
 xtcl: literal \n in code breaks — keep TCL code single-line, or call multiple times.
 
 xpy bare expressions produce no output:
     xpy(pane, "x") → empty. Use print(x).
-
-Compound Python statements (for/if/while/def/class/with/try) need triple-quoted code:
-    xpy(pane, """
-    for x in range(10):
-        print(x)
-    """)
 
 file= path is resolved relative to the agent's working directory, not the pane's cwd.
     xpy(pane, file="train.py")  # /home/user/project/train.py if agent cwd is /home/user/project
@@ -237,6 +241,11 @@ Long EDA / training / build commands:
 Exit commands change the prompt — default mode can't detect completion.
 Use read_after for exit:
     xtcl(pane, "exit", read_after=1)
+
+A promoted task that NEVER completes usually means the command changed
+the prompt (python3 / ssh / exit / docker exec) — the end marker can
+never appear. send_keys(pane, "C-c"), task_cancel, then retry the same
+command with read_after.
 
 Pane death during task:
     task_output(task_id) shows the tmux error reason.
