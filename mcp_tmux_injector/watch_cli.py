@@ -49,12 +49,17 @@ def get_fresh_lines(lines: list[str], fingerprint: list[str], fingerprint_total:
     """Return lines that appeared after the fingerprint snapshot.
 
     - Fingerprint found: lines after it.
+    - Fingerprint's last line mutated (interactive prompt got a command
+      typed onto it: "$" -> "$ cmd"): match without it; the mutated line
+      counts as fresh — it IS new content.
     - Fingerprint scrolled out (50+ new lines): all lines (old content gone too).
     - Fingerprint changed by progress bars: empty list (wait more).
     """
     if fingerprint:
         stable_lines = [l for l in lines if not TQDM_PROGRESS_LINE.search(l)]
         fp_end_stable = find_fingerprint(stable_lines, fingerprint)
+        if fp_end_stable is None and len(fingerprint) > 1:
+            fp_end_stable = find_fingerprint(stable_lines, fingerprint[:-1])
         if fp_end_stable is not None:
             count = 0
             cutoff = len(lines)

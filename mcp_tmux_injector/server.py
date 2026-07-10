@@ -243,7 +243,10 @@ async def _blocking_on_pane(p: str, code: str, send_fn, timeout: float, filter_k
         }
         converted = True
         threading.Thread(target=tasks.watch_task_completion, args=(task_id,), daemon=True).start()
-        return f"[task promoted] {task_id} ({p}, {timeout}s)"
+        return (
+            f"[task promoted] {task_id} ({p}, {timeout}s)\n"
+            f"(prompt-changing cmd (python3/ssh/exit)? it will never complete — C-c, retry with read_after)"
+        )
     except asyncio.CancelledError:
         tasks._tasks[task_id] = {
             "pane": p, "begin": begin, "end": end,

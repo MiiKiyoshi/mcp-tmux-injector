@@ -98,6 +98,11 @@ check("fresh lines fp changed -> wait",
       get_fresh_lines(["a", "b", "c"], fp, 3) == [])
 check("fresh lines no fp -> beyond total",
       get_fresh_lines(["a", "b", "c"], [], 2) == ["c"])
+# 대화형 프롬프트 변형: 지문 마지막 줄 "$"가 "$ echo hi"로 바뀐 경우
+check("fresh lines mutated prompt line",
+      get_fresh_lines(["l1", "l2", "$ echo hi", "hi"], ["l1", "l2", "$"], 3) == ["$ echo hi", "hi"])
+check("fresh lines single-line fp mutated -> wait (no [:-1] retry)",
+      get_fresh_lines(["$ echo hi", "hi"], ["$"], 1) == [])
 
 # --- cmd_display ---
 check("cmd_display short", cmd_display("ls") == "ls")
