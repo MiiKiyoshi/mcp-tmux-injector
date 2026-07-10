@@ -31,11 +31,11 @@ mcp-tmux-injector = "mcp_tmux_injector:main"
 
 
 [tool.hatch.build.targets.wheel]
-include = ["mcp_tmux_injector.py"]
+packages = ["mcp_tmux_injector"]
 
 [tool.hatch.build.targets.sdist]
 include = [
-    "mcp_tmux_injector.py",
+    "mcp_tmux_injector",
     "instructions.txt",
     "README.md",
     "LICENSE",
