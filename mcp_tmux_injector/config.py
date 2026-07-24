@@ -10,6 +10,7 @@ INSTRUCTIONS = _INSTRUCTIONS_FILE.read_text() if _INSTRUCTIONS_FILE.exists() els
 # Deny-list config: ~/.config/mcp-tmux-injector/config.json
 _CONFIG_PATH = Path.home() / ".config" / "mcp-tmux-injector" / "config.json"
 _deny_rules: dict[str, list[str]] = {}  # {"shell": [...], "python": [...], "tcl": [...], "send_text": [...]}
+TMUX_SOCKET_PATH: str | None = None
 
 # Directory for fingerprint snapshot files (used by Monitor-mode poll_pane)
 FINGERPRINT_DIR = Path.home() / ".cache" / "mcp-tmux-injector" / "fingerprints"
@@ -22,10 +23,15 @@ SERVER_BIN = str(Path(sys.executable).parent / "mcp-tmux-injector")
 
 
 def _load_config():
-    global _deny_rules
+    global _deny_rules, TMUX_SOCKET_PATH
     if _CONFIG_PATH.exists():
         cfg = json.loads(_CONFIG_PATH.read_text())
         _deny_rules = cfg.get("deny", {})
+        if "tmux" in cfg and "socket_path" in cfg["tmux"]:
+            socket_path = Path(cfg["tmux"]["socket_path"]).expanduser()
+            if not socket_path.is_absolute():
+                raise ValueError("tmux.socket_path must be an absolute path")
+            TMUX_SOCKET_PATH = str(socket_path)
 
 
 _load_config()
