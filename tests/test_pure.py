@@ -17,6 +17,7 @@ from mcp_tmux_injector.filters import (
     parse_rel_range,
 )
 from mcp_tmux_injector.tasks import cmd_display
+from mcp_tmux_injector import tmux
 from mcp_tmux_injector.watch_cli import find_fingerprint, get_fresh_lines
 
 FAILURES = []
@@ -28,6 +29,19 @@ def check(name, cond, detail=""):
     else:
         print(f"  [FAIL] {name}  {detail}")
         FAILURES.append(name)
+
+
+# --- tmux command construction ---
+original_socket_path = tmux.TMUX_SOCKET_PATH
+tmux.TMUX_SOCKET_PATH = None
+check("tmux default socket", tmux.build_tmux_command(["list-sessions"]) == ["tmux", "list-sessions"])
+tmux.TMUX_SOCKET_PATH = "/tmp/custom-tmux.sock"
+check(
+    "tmux configured socket",
+    tmux.build_tmux_command(["list-sessions"]) ==
+    ["tmux", "-S", "/tmp/custom-tmux.sock", "list-sessions"],
+)
+tmux.TMUX_SOCKET_PATH = original_socket_path
 
 
 # --- markers / extraction ---

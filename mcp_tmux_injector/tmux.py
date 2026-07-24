@@ -3,11 +3,22 @@ import shlex
 import subprocess
 import time
 
+from .config import TMUX_SOCKET_PATH
+
+
+def build_tmux_command(args: list[str]) -> list[str]:
+    """Build a tmux command using the configured socket when present."""
+    command = ["tmux"]
+    if TMUX_SOCKET_PATH is not None:
+        command.extend(["-S", TMUX_SOCKET_PATH])
+    command.extend(args)
+    return command
+
 
 def run_tmux_cmd(args: list[str], capture: bool = True, raise_on_error: bool = False) -> str:
     """Run a tmux command and return output."""
     result = subprocess.run(
-        ["tmux"] + args,
+        build_tmux_command(args),
         capture_output=capture,
         text=True
     )
@@ -34,7 +45,7 @@ def check_session(session: str) -> bool:
     if cached and now - cached[1] < _SESSION_CACHE_TTL:
         return cached[0]
     result = subprocess.run(
-        ["tmux", "has-session", "-t", f"={sess_name}"],
+        build_tmux_command(["has-session", "-t", f"={sess_name}"]),
         capture_output=True
     )
     exists = result.returncode == 0
@@ -78,7 +89,7 @@ def parse_pane_id(pane: str) -> tuple[str, str, str]:
 def list_sessions() -> list[dict]:
     """List available tmux sessions."""
     result = subprocess.run(
-        ["tmux", "list-sessions", "-F", "#{session_name}:#{session_windows}:#{session_attached}"],
+        build_tmux_command(["list-sessions", "-F", "#{session_name}:#{session_windows}:#{session_attached}"]),
         capture_output=True,
         text=True
     )
@@ -100,7 +111,7 @@ def list_sessions() -> list[dict]:
 def list_windows(session: str) -> list[str]:
     """List window names in a tmux session."""
     result = subprocess.run(
-        ["tmux", "list-windows", "-t", f"={session}", "-F", "#{window_name}"],
+        build_tmux_command(["list-windows", "-t", f"={session}", "-F", "#{window_name}"]),
         capture_output=True, text=True
     )
     if result.returncode != 0:
@@ -115,7 +126,7 @@ def resolve_window(session: str, window: str) -> str:
     if window in names:
         return window
     result = subprocess.run(
-        ["tmux", "list-windows", "-t", f"={session}", "-F", "#{window_index}|#{window_name}"],
+        build_tmux_command(["list-windows", "-t", f"={session}", "-F", "#{window_index}|#{window_name}"]),
         capture_output=True, text=True
     )
     if result.returncode == 0:

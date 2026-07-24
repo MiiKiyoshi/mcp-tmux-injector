@@ -79,10 +79,13 @@ The agent dispatches to multiple panes via `panes=` + `codes=`.
 
 ## Configuration
 
-Optional deny-list at `~/.config/mcp-tmux-injector/config.json`:
+Optional settings at `~/.config/mcp-tmux-injector/config.json`:
 
 ```json
 {
+  "tmux": {
+    "socket_path": "/absolute/path/to/tmux.sock"
+  },
   "deny": {
     "shell": ["kubectl *", "rm -rf /*"],
     "python": [],
@@ -91,6 +94,9 @@ Optional deny-list at `~/.config/mcp-tmux-injector/config.json`:
   }
 }
 ```
+
+When `tmux.socket_path` is set, every tmux operation uses that socket. When it
+is omitted, tmux uses its default socket selection.
 
 Patterns use [fnmatch](https://docs.python.org/3/library/fnmatch.html) and match per line of code being sent. If the file is missing, nothing is blocked.
 

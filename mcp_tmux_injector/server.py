@@ -746,7 +746,7 @@ def _ls_collect(session: str, window: str) -> tuple[list[tuple] | None, set[str]
     Returns (None, empty set) when tmux has no server/sessions."""
     fmt = "#{session_name}|#{window_index}|#{window_name}|#{automatic-rename}|#{pane_index}|#{pane_tty}|#{pane_current_path}|#{pane_pid}"
     result = subprocess.run(
-        ["tmux", "list-panes", "-a", "-F", fmt],
+        tmux.build_tmux_command(["list-panes", "-a", "-F", fmt]),
         capture_output=True, text=True
     )
     if result.returncode != 0:
@@ -945,21 +945,21 @@ def create_session(name: str, windows: list[str] = None, start_dir: str = None, 
     _validate_multi(cmd, cmds, "cmds", windows)
 
     w_cmd = cmds[0] if cmds else cmd
-    args = ["tmux", "new-session", "-d", "-s", name, "-n", windows[0]]
+    args = ["new-session", "-d", "-s", name, "-n", windows[0]]
     if start_dir:
         args.extend(["-c", os.path.expanduser(start_dir)])
     if w_cmd:
         args.append(tmux.wrap_cmd(w_cmd))
-    subprocess.run(args, capture_output=True)
+    subprocess.run(tmux.build_tmux_command(args), capture_output=True)
 
     for wi, w_name in enumerate(windows[1:], 1):
         w_cmd = cmds[wi] if cmds else cmd
-        w_args = ["tmux", "new-window", "-t", name, "-n", w_name]
+        w_args = ["new-window", "-t", name, "-n", w_name]
         if start_dir:
             w_args.extend(["-c", os.path.expanduser(start_dir)])
         if w_cmd:
             w_args.append(tmux.wrap_cmd(w_cmd))
-        subprocess.run(w_args, capture_output=True)
+        subprocess.run(tmux.build_tmux_command(w_args), capture_output=True)
 
     # The existence check above cached this session as absent (2s TTL) —
     # drop that entry so commands right after creation see the new session.
@@ -993,7 +993,7 @@ def kill_session(name: str, force: bool = Field(False, description="force kill e
     registry.check_ownership("Session", name, owner, force)
 
     registry.cleanup_session_resources(name)
-    subprocess.run(["tmux", "kill-session", "-t", f"={name}"], capture_output=True)
+    subprocess.run(tmux.build_tmux_command(["kill-session", "-t", f"={name}"]), capture_output=True)
     tmux.forget_session(name)
 
     return f"Killed session '{name}'"
@@ -1010,12 +1010,12 @@ def create_window(session: str, name: str, start_dir: str = None, cmd: str = Non
     if name in existing:
         raise ValueError(f"Window '{name}' already exists in session '{session}'")
 
-    args = ["tmux", "new-window", "-t", session, "-n", name]
+    args = ["new-window", "-t", session, "-n", name]
     if start_dir:
         args.extend(["-c", os.path.expanduser(start_dir)])
     if cmd:
         args.append(tmux.wrap_cmd(cmd))
-    subprocess.run(args, capture_output=True)
+    subprocess.run(tmux.build_tmux_command(args), capture_output=True)
 
     if session not in registry._sessions:
         registry._sessions[session] = {
@@ -1045,7 +1045,7 @@ def kill_window(session: str, window: str, force: bool = Field(False, descriptio
     registry.check_ownership("Window", f"{session}:{window_name}", owner, force)
 
     registry.cleanup_window_resources(session, window_name)
-    subprocess.run(["tmux", "kill-window", "-t", f"={session}:{window_name}"], capture_output=True)
+    subprocess.run(tmux.build_tmux_command(["kill-window", "-t", f"={session}:{window_name}"]), capture_output=True)
 
     return f"Killed window '{window_name}' in session '{session}'"
 
@@ -1085,11 +1085,11 @@ def _respawn_single(pane: str, start_dir: str = None, cmd: str = None) -> str:
         raise ValueError(f"Pane '{pane}' does not exist: {e}")
     cleaned = registry.cleanup_pane_tasks(pane)
     cmd = cmd or "bash"
-    args = ["tmux", "respawn-pane", "-k", "-t", pane]
+    args = ["respawn-pane", "-k", "-t", pane]
     if start_dir:
         args.extend(["-c", os.path.expanduser(start_dir)])
     args.append(tmux.wrap_cmd(cmd))
-    subprocess.run(args, capture_output=True)
+    subprocess.run(tmux.build_tmux_command(args), capture_output=True)
     desc = registry._working_panes[pane]["description"]
     parts = [f"Respawned: {pane} ({desc})"]
     if cleaned:
