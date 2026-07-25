@@ -20,8 +20,7 @@ Not a sandboxed subprocess: commands have real consequences in the user's enviro
 │       Default timeout=3s (capped at 60s).
 │       Completes within timeout → output returned.
 │       Exceeds timeout → auto-promotes; returned message contains task_id.
-│       For known-slow commands (EDA TCL, training, big builds) override:
-│         xtcl(pane, code, timeout=60)
+│       For known-slow commands, see §8.
 │
 ├─ Enter or exit an interpreter / remote shell (prompt changes)
 │   └─→ xsh / xpy / xtcl with read_after=N
@@ -70,17 +69,13 @@ Not a sandboxed subprocess: commands have real consequences in the user's enviro
 
 ## 2. Common patterns
 
-Quick interactive command (returns output directly):
-    xsh(pane, "python3", read_after=2)
-    xpy(pane, "print(1+1)")
-    xpy(pane, "exit()", read_after=1)
-
 ### Long-running command completion
 
 An `xsh`, `xpy`, or `xtcl` call that exceeds its inline timeout returns a
 `task_id`. Call `task_wait(task_id)` once. It returns a wrapper script path.
 Start that script with the client-specific completion flow below. After its
-completion notification, call `task_output(task_id)` for the command body.
+wait completes or its completion notification arrives, call
+`task_output(task_id)` for the command body.
 
 #### Claude Code
 
@@ -127,14 +122,12 @@ const result = await pending;
 notify(result.output.trim());
 ```
 
-After the notification:
+#### Other harnesses
 
-```text
-task_output(task_id="T...")
-```
-
-Forcing a longer wait inline (no async wrapper):
-    xtcl(pane, "place_design", timeout=60)   # waits up to 60s, still auto-promotes if exceeded
+Use the current harness's background command facility when it returns control
+immediately and sends a completion interrupt. When that facility does not
+exist, run the wrapper script with the harness's `bash` tool and wait for it to
+return before calling `task_output(task_id)`.
 
 Waiting for a pattern in an already-running task:
     cmd = poll_pane(pane=pane, pattern="Build complete|ERROR")
