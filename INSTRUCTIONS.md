@@ -84,13 +84,15 @@ completion notification, call `task_output(task_id)` for the command body.
 
 #### Claude Code
 
-Pass the wrapper script path directly to the `command` parameter of the
-`Monitor` tool. `Monitor` returns control immediately and delivers a completion
-notification when the wrapper exits.
+Pass the wrapper script path to the `command` parameter of the `Monitor`
+tool, together with a `description` (required: the call fails without it,
+unlike `timeout_ms`/`persistent` which default to 300000ms/false). `Monitor`
+returns control immediately and delivers a completion notification when the
+wrapper exits.
 
 ```text
 wait_script = task_wait(task_id="T...")
-Monitor(command=wait_script)
+Monitor(command=wait_script, description="<what you're waiting for>")
 # completion notification arrives
 task_output(task_id="T...")
 ```
