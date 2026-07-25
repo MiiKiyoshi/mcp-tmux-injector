@@ -36,7 +36,7 @@ packages = ["mcp_tmux_injector"]
 [tool.hatch.build.targets.sdist]
 include = [
     "mcp_tmux_injector",
-    "instructions.txt",
+    "INSTRUCTIONS.md",
     "README.md",
     "LICENSE",
 ]
