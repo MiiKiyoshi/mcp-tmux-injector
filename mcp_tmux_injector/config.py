@@ -4,7 +4,7 @@ import json
 import sys
 from pathlib import Path
 
-_INSTRUCTIONS_FILE = Path(__file__).parent.parent / "instructions.txt"
+_INSTRUCTIONS_FILE = Path(__file__).parent.parent / "INSTRUCTIONS.md"
 INSTRUCTIONS = _INSTRUCTIONS_FILE.read_text() if _INSTRUCTIONS_FILE.exists() else ""
 
 # Deny-list config: ~/.config/mcp-tmux-injector/config.json

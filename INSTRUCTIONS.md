@@ -1,18 +1,19 @@
+# tmux-injector instructions
+
 This describes how you use tmux-injector tools. This is how the system works.
 
 Panes are the user's live terminal sessions.
 Same shell, same aliases, same PATH, same environment as if the user typed directly.
-Not a sandboxed subprocess — commands have real consequences in the user's environment.
+Not a sandboxed subprocess: commands have real consequences in the user's environment.
 
-==========
-1. TOOL SELECTION
-==========
+## 1. Tool selection
 
+```text
 ┌─ Need a fresh workspace (REPL, build, benchmark)?
 │   └─→ create_session("<purpose>")   ALWAYS a new, dedicated session.
 │       NEVER host your work in a session you did not create this
 │       conversation. "Only one session exists" is NOT a reason to
-│       reuse it — make your own.
+│       reuse it: make your own.
 │
 ┌─ Run a command (any duration)
 │   └─→ xsh / xpy / xtcl (default mode)
@@ -25,7 +26,7 @@ Not a sandboxed subprocess — commands have real consequences in the user's env
 ├─ Enter or exit an interpreter / remote shell (prompt changes)
 │   └─→ xsh / xpy / xtcl with read_after=N
 │       Sends code, sleeps N seconds, returns the pane capture.
-│       Use whenever the prompt changes — default mode can't detect
+│       Use whenever the prompt changes: default mode can't detect
 │       completion when the prompt itself is changing.
 │         xsh(pane, "python3", read_after=2)        # enter Python REPL
 │         xpy(pane, "exit()", read_after=1)         # exit Python REPL
@@ -33,10 +34,9 @@ Not a sandboxed subprocess — commands have real consequences in the user's env
 │
 ├─ Wait for an already-promoted task to finish
 │   └─→ task_wait(task_id)
-│       Returns a path to a wrapper script. Run it via your client's
-│       subprocess tool (Claude Code: Monitor). The script blocks, then
-│       prints a one-line outcome and exits. Call task_output(task_id)
-│       for the body.
+│       Returns a path to a wrapper script. Start it with the client-specific
+│       completion flow in §2. The script blocks, prints one outcome line,
+│       and exits. Call task_output(task_id) for the body.
 │
 ├─ Wait for specific output to appear (no task_id)
 │   └─→ poll_pane(pane, pattern, only_new=True|False)
@@ -66,23 +66,70 @@ Not a sandboxed subprocess — commands have real consequences in the user's env
 │
 └─ Check sessions, processes, GPU memory
     └─→ ls (compact overview), ls(session=, gpu=True) (detailed + GPU)
+```
 
-==========
-2. COMMON PATTERNS
-==========
+## 2. Common patterns
 
 Quick interactive command (returns output directly):
     xsh(pane, "python3", read_after=2)
     xpy(pane, "print(1+1)")
     xpy(pane, "exit()", read_after=1)
 
-Long-running command — auto-promoted, then watched asynchronously:
-    xsh(pane, "python3", read_after=2)
-    result = xpy(pane, file="train.py")
-    # Finishes in 3s → result is output. Otherwise → result has task_id.
-    cmd = task_wait(task_id="...")           # path to wrapper script
-    # Run cmd via your subprocess tool. It prints a one-line outcome.
-    task_output(task_id="...")               # full body after the line arrives
+### Long-running command completion
+
+An `xsh`, `xpy`, or `xtcl` call that exceeds its inline timeout returns a
+`task_id`. Call `task_wait(task_id)` once. It returns a wrapper script path.
+Start that script with the client-specific completion flow below. After its
+completion notification, call `task_output(task_id)` for the command body.
+
+#### Claude Code
+
+Pass the wrapper script path directly to the `command` parameter of the
+`Monitor` tool. `Monitor` returns control immediately and delivers a completion
+notification when the wrapper exits.
+
+```text
+wait_script = task_wait(task_id="T...")
+Monitor(command=wait_script)
+# completion notification arrives
+task_output(task_id="T...")
+```
+
+#### Codex
+
+Run the wrapper in `functions.exec`. `yield_control()` returns control while the
+script continues. If `exec_command` yields a session, `write_stdin` keeps
+waiting on that same session. `notify()` delivers the completion output without
+requiring a later wait call on the exec cell.
+
+```javascript
+const waitScript = "/tmp/tmix_w_...sh"; // returned by task_wait
+const pending = (async () => {
+  let result = await tools.exec_command({
+    cmd: waitScript,
+    yield_time_ms: 30000,
+  });
+  while (result.session_id !== undefined) {
+    result = await tools.write_stdin({
+      session_id: result.session_id,
+      chars: "",
+      yield_time_ms: 300000,
+    });
+  }
+  return result;
+})();
+
+text("task wait started");
+yield_control();
+const result = await pending;
+notify(result.output.trim());
+```
+
+After the notification:
+
+```text
+task_output(task_id="T...")
+```
 
 Forcing a longer wait inline (no async wrapper):
     xtcl(pane, "place_design", timeout=60)   # waits up to 60s, still auto-promotes if exceeded
@@ -101,7 +148,7 @@ After respawn/create with cmd= (process starts immediately):
     respawn_pane(pane, cmd="python3")
     cmd = poll_pane(pane=pane, pattern=">>>", only_new=False)
     # Run cmd via subprocess tool. only_new=False because ">>>" is already
-    # on screen — only_new=True would never match (would be in the snapshot).
+    # on screen: only_new=True would never match (would be in the snapshot).
 
 Entering a remote shell:
     xsh(pane, "mlx2", read_after=2)         # kubectl exec, ssh, docker exec
@@ -112,7 +159,7 @@ Entering a remote shell:
     xpy(pane, "exit()", read_after=1)       # leave the remote REPL
     xsh(pane, "exit", read_after=1)         # return to local shell
 
-    Code travels as keystrokes only — no shared filesystem assumed, so
+    Code travels as keystrokes only: no shared filesystem assumed, so
     everything works identically on remote hosts. file= reads the LOCAL
     path and embeds the content into the payload.
 
@@ -128,9 +175,7 @@ Setting up parallel workspaces:
     create_session("exp", windows=["a", "b"], cmds=["python3", "bash"])
     # per-window commands: window a→python3, window b→bash
 
-==========
-3. PANE REGISTRATION (REQUIRED)
-==========
+## 3. Pane registration
 
 Panes must be registered before use.
 
@@ -142,11 +187,9 @@ Panes must be registered before use.
 Registering a pane ≠ owning its session.
 set_pane lets you TALK to an existing pane. It does NOT authorize
 creating/killing windows in that pane's session. Host-session choice
-is a separate decision — see TOOL SELECTION top box.
+is a separate decision: see TOOL SELECTION top box.
 
-==========
-4. MULTI-PANE OPERATIONS
-==========
+## 4. Multi-pane operations
 
 All x* tools accept panes= for parallel dispatch.
 code= sends the same code to all panes. codes= sends different code per pane (1:1 indexed).
@@ -159,23 +202,21 @@ Different code per pane:
 
 Per-pane outcome (default mode): each pane independently either returns output
 or promotes to a task. The aggregated result lists output for finished panes
-and task_id for promoted ones — call task_wait per task_id for any that are
+and task_id for promoted ones: call task_wait per task_id for any that are
 still running.
 
-read_after mode also works with panes= — same N-second wait per pane, all
+read_after mode also works with panes=: same N-second wait per pane, all
 captured concurrently.
 
 code and codes are mutually exclusive. cmd and cmds are mutually exclusive.
 codes/cmds length must match target count.
 
-==========
-5. CODE LIMITATIONS
-==========
+## 5. Code limitations
 
-xpy / xsh: multi-line code is OK — including compound statements
+xpy / xsh: multi-line code is OK: including compound statements
 (for/if/while/def/class/with/try). Code is delivered as one payload,
 not typed line-by-line, so REPL continuation prompts are never an issue.
-xtcl: literal \n in code breaks — keep TCL code single-line, or call multiple times.
+xtcl: literal \n in code breaks: keep TCL code single-line, or call multiple times.
 
 xpy bare expressions produce no output:
     xpy(pane, "x") → empty. Use print(x).
@@ -183,11 +224,9 @@ xpy bare expressions produce no output:
 file= path is resolved relative to the agent's working directory, not the pane's cwd.
     xpy(pane, file="train.py")  # /home/user/project/train.py if agent cwd is /home/user/project
 
-Don't use import / reload in the REPL — use file= instead.
+Don't use import / reload in the REPL: use file= instead.
 
-==========
-6. capture_pane: tail AND grep
-==========
+## 6. `capture_pane`: `tail` and `grep`
 
 tail= defines the visible window. grep= searches within that window.
     capture_pane(pane, tail=30)                    # last 30 lines
@@ -197,18 +236,16 @@ tail= defines the visible window. grep= searches within that window.
 grep does NOT expand the capture range. To search deeper scrollback, increase tail:
     capture_pane(pane, tail=4000, grep="FATAL")    # search last 4000 lines
 
-==========
-7. STATE TRACKING
-==========
+## 7. State tracking
 
 Pane state is tracked in memory. capture_pane is not called before every command.
 
 State changes to remember:
-- xsh(pane, "python3", read_after=2) → pane is now Python REPL — use xpy
-- xpy(pane, "exit()", read_after=1)  → pane is back in shell — use xsh
-- xsh(pane, "openroad", read_after=2) → pane is now in TCL — use xtcl
-- xtcl(pane, "exit", read_after=1)   → pane is back in shell — use xsh
-- send_keys(pane, "C-c C-c")          → state uncertain — capture_pane to confirm
+- xsh(pane, "python3", read_after=2) → pane is now Python REPL: use xpy
+- xpy(pane, "exit()", read_after=1)  → pane is back in shell: use xsh
+- xsh(pane, "openroad", read_after=2) → pane is now in TCL: use xtcl
+- xtcl(pane, "exit", read_after=1)   → pane is back in shell: use xsh
+- send_keys(pane, "C-c C-c")          → state uncertain: capture_pane to confirm
 - respawn_pane(pane)                  → pane is back in shell, tasks cleaned
 
 capture_pane is used when:
@@ -217,17 +254,15 @@ capture_pane is used when:
 
 For task progress, use task_status / task_output (not capture_pane).
 
-==========
-8. TIMEOUT AND CANCELLATION
-==========
+## 8. Timeout and cancellation
 
 All x* tools send code to tmux before waiting for output.
-Any interruption — timeout, abort, user reject, cancel — means code was already sent.
+Any interruption: timeout, abort, user reject, cancel: means code was already sent.
 
 Timeout (default 3s, exceeded):
     Tool returns "[task promoted] T... (pane, Ns)".
-    The task is registered automatically; use task_wait(task_id) → run
-    the returned script via your subprocess tool to learn when it ends.
+    The task is registered automatically. Follow §2 Long-running command
+    completion.
 
 User cancellation (CancelledError):
     Auto-converts to background task, same as timeout.
@@ -236,14 +271,15 @@ User cancellation (CancelledError):
 Long EDA / training / build commands:
     Override timeout up to 60s for inline wait:
         xtcl(pane, "place_design", timeout=60)
-    Beyond 60s, the task auto-promotes. Use task_wait then run the script.
+    Beyond 60s, the task auto-promotes. Follow §2 Long-running command
+    completion.
 
-Exit commands change the prompt — default mode can't detect completion.
+Exit commands change the prompt: default mode can't detect completion.
 Use read_after for exit:
     xtcl(pane, "exit", read_after=1)
 
 A promoted task that NEVER completes usually means the command changed
-the prompt (python3 / ssh / exit / docker exec) — the end marker can
+the prompt (python3 / ssh / exit / docker exec): the end marker can
 never appear. send_keys(pane, "C-c"), task_cancel, then retry the same
 command with read_after.
 
@@ -251,24 +287,20 @@ Pane death during task:
     task_output(task_id) shows the tmux error reason.
     Recovery: ls() to check pane state → if alive, reuse directly.
 
-task_cancel removes tracking only — execution in tmux continues.
+task_cancel removes tracking only: execution in tmux continues.
 To actually stop: send_keys(pane, "C-c") first, then task_cancel.
 
-==========
-9. CONVERSATION CONTINUITY
-==========
+## 9. Conversation continuity
 
 Registered panes persist in MCP server memory across conversation compaction.
 After compaction: ls() to check what is registered.
 New session or server restart: ask user which pane to use.
 
 
-==========
-10. OWNERSHIP MODEL
-==========
+## 10. Ownership model
 
 managed  = created this session via create_session/create_window.
-external = set_pane()-registered. Origin opaque — user, a script, a prior
+external = set_pane()-registered. Origin opaque: user, a script, a prior
            agent, anyone. "external" labels the registration path, not ownership.
 
 Agent direct shell: no tmux new-session/kill-session/new-window/kill-window.

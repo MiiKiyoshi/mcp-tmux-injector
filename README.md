@@ -1,6 +1,6 @@
 # mcp-tmux-injector
 
-MCP server that lets AI agents inject commands into tmux panes and read back output — Python REPLs, TCL interpreters, shell sessions.
+MCP server that lets AI agents inject commands into tmux panes and read back output: Python REPLs, TCL interpreters, shell sessions.
 
 ## Why
 
@@ -8,14 +8,14 @@ CLI agents can't natively talk to a live REPL or a long-running shell. This serv
 
 ## Features
 
-- **Three execution tools** — `xsh` (shell), `xpy` (Python REPL), `xtcl` (TCL/EDA tools).
+- **Three execution tools**: `xsh` (shell), `xpy` (Python REPL), `xtcl` (TCL/EDA tools).
   - Default mode runs the command and waits up to 3 seconds (override up to 60). Longer commands turn into a background task; the call returns a `task_id` instead of output.
-  - `read_after=N` skips the wait-for-completion logic — sends the code, sleeps N seconds, returns the pane's screen content. Use when the prompt itself is changing (entering a REPL, ssh, exit).
-- **Get notified when something finishes** — `task_wait(task_id)` and `poll_pane(pattern)` return a small wrapper script. Run it through your client's command runner (Claude Code's `Monitor` is built for exactly this); when the task completes or the pattern matches, the script prints one line and exits. Then `task_output(task_id)` returns the full body.
-- **Save output to a file** — `task_output(save=path)` and `capture_pane(save=path)` write filtered output to disk.
-- **Per-pane locking** — only one injected command runs on a pane at a time.
-- **Multi-pane dispatch** — `panes=[…]` with either `code=` (same code to all) or `codes=[…]` (different code per pane).
-- **Works over ssh** — a pane that is ssh'd into another machine, or running a REPL there, behaves the same as a local one. Code is delivered as keystrokes, so nothing needs to exist on the remote filesystem — `file=` included.
+  - `read_after=N` skips the wait-for-completion logic: sends the code, sleeps N seconds, returns the pane's screen content. Use when the prompt itself is changing (entering a REPL, ssh, exit).
+- **Get notified when something finishes**: `task_wait(task_id)` and `poll_pane(pattern)` return a small wrapper script. Run it with the client-specific completion flow in [INSTRUCTIONS.md](INSTRUCTIONS.md); when the task completes or the pattern matches, the script prints one line and exits. Then `task_output(task_id)` returns the full body.
+- **Save output to a file**: `task_output(save=path)` and `capture_pane(save=path)` write filtered output to disk.
+- **Per-pane locking**: only one injected command runs on a pane at a time.
+- **Multi-pane dispatch**: `panes=[…]` with either `code=` (same code to all) or `codes=[…]` (different code per pane).
+- **Works over ssh**: a pane that is ssh'd into another machine, or running a REPL there, behaves the same as a local one. Code is delivered as keystrokes, so nothing needs to exist on the remote filesystem: `file=` included.
 
 ## Requirements
 
@@ -59,7 +59,7 @@ create_session("work", windows=["train", "eval"])  # or a new managed session
 "Run train.py and let me know when it's done"
 ```
 
-The agent runs `xsh(pane, "python3", read_after=2)` then `xpy(pane, file="train.py")`. Long scripts return a `task_id`; the agent passes `task_wait(task_id)`'s wrapper script to `Monitor` (or any client's command runner), gets a one-line completion notice, and calls `task_output(task_id)` for the body.
+The agent runs `xsh(pane, "python3", read_after=2)` then `xpy(pane, file="train.py")`. Long scripts return a `task_id`; the agent follows the client-specific completion flow in [INSTRUCTIONS.md](INSTRUCTIONS.md), gets a one-line completion notice, and calls `task_output(task_id)` for the body.
 
 **Parallel work across windows**
 
@@ -102,7 +102,7 @@ Patterns use [fnmatch](https://docs.python.org/3/library/fnmatch.html) and match
 
 ## Tool reference
 
-See [instructions.txt](instructions.txt).
+See [INSTRUCTIONS.md](INSTRUCTIONS.md).
 
 ## Code layout
 
