@@ -9,7 +9,7 @@ CLI agents can't natively talk to a live REPL or a long-running shell. This serv
 ## Features
 
 - **Three execution tools**: `xsh` (shell), `xpy` (Python REPL), `xtcl` (TCL/EDA tools).
-  - Default mode runs the command and waits up to 3 seconds (override up to 60). Longer commands turn into a background task; the call returns a `task_id` instead of output.
+  - Default mode waits up to 3 seconds, then turns unfinished work into a background task and returns its `task_id`. Known-slow work leaves the inline timeout unset so this response returns before the MCP client request expires.
   - `read_after=N` skips the wait-for-completion logic: sends the code, sleeps N seconds, returns the pane's screen content. Use when the prompt itself is changing (entering a REPL, ssh, exit).
 - **Get notified when something finishes**: `task_wait(task_id)` and `poll_pane(pattern)` return a small wrapper script. Run it with the client-specific completion flow in [INSTRUCTIONS.md](INSTRUCTIONS.md); when the task completes or the pattern matches, the script prints one line and exits. Then `task_output(task_id)` returns the full body.
 - **Save output to a file**: `task_output(save=path)` and `capture_pane(save=path)` write filtered output to disk.

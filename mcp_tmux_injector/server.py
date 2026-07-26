@@ -368,7 +368,7 @@ async def xpy(
     code: str = None,
     codes: list[str] = None,
     file: str = Field(None, description="Execute a .py file via exec(). Path resolved relative to agent cwd. Use instead of code='exec(open(...).read())'"),
-    timeout: float = Field(None, description="default mode: max seconds to wait for end marker before auto-promoting to background task (default 3s, capped at 60s). Mutually exclusive with read_after."),
+    timeout: float = Field(None, description="Optional inline wait before auto-promotion (default 3s, capped at 60s). Leave unset for long work so promotion returns before the MCP client request expires. Mutually exclusive with read_after."),
     read_after: float = Field(None, description="read_after mode: skip end-marker detection, send code, sleep N seconds, return pane capture from begin marker. For prompt-changing commands (entering/exiting REPL, ssh). Capped at 60s. Mutually exclusive with timeout."),
     tail: int = 0,
     head: int = None,
@@ -420,7 +420,7 @@ async def xtcl(
     pane: str = None,
     code: str = "",
     codes: list[str] = None,
-    timeout: float = Field(None, description="default mode: max seconds to wait for end marker before auto-promoting to background task (default 3s, capped at 60s). Mutually exclusive with read_after."),
+    timeout: float = Field(None, description="Optional inline wait before auto-promotion (default 3s, capped at 60s). Leave unset for long work so promotion returns before the MCP client request expires. Mutually exclusive with read_after."),
     read_after: float = Field(None, description="read_after mode: skip end-marker detection, send code, sleep N seconds, return pane capture from begin marker. For prompt-changing commands (entering/exiting REPL, ssh). Capped at 60s. Mutually exclusive with timeout."),
     tail: int = 0,
     head: int = None,
@@ -457,7 +457,7 @@ async def xsh(
     code: str = None,
     codes: list[str] = None,
     file: str = None,
-    timeout: float = Field(None, description="default mode: max seconds to wait for end marker before auto-promoting to background task (default 3s, capped at 60s). Mutually exclusive with read_after."),
+    timeout: float = Field(None, description="Optional inline wait before auto-promotion (default 3s, capped at 60s). Leave unset for long work so promotion returns before the MCP client request expires. Mutually exclusive with read_after."),
     read_after: float = Field(None, description="read_after mode: skip end-marker detection, send code, sleep N seconds, return pane capture from begin marker. For prompt-changing commands (entering/exiting REPL, ssh). Capped at 60s. Mutually exclusive with timeout."),
     tail: int = 0,
     head: int = None,
@@ -506,18 +506,25 @@ async def xsh(
 @mcp.tool()
 @_plain_defaults
 def task_status(task_id: str = None, pane: str = None) -> str:
-    """Check task status (non-blocking). Returns status and elapsed time only."""
-    task = _get_task(_resolve_task_id(task_id, pane))
+    """Check task status and return the next completion action."""
+    resolved_id = _resolve_task_id(task_id, pane)
+    task = _get_task(resolved_id)
     completed = tasks.refresh_task(task)
     disp = tasks.cmd_display(task.get("command", ""))
 
     if completed:
         status = "error" if "error" in task else "completed"
         elapsed = task["end_time"] - task["start_time"]
-        return f"[{status}] {elapsed:.1f}s  {task['pane']}  \"{disp}\""
+        return (
+            f"[{status}] {elapsed:.1f}s  {task['pane']}  \"{disp}\"\n"
+            f'next: task_output(task_id="{resolved_id}")'
+        )
 
     elapsed = time.time() - task["start_time"]
-    return f"[running] {elapsed:.1f}s  {task['pane']}  \"{disp}\""
+    return (
+        f"[running] {elapsed:.1f}s  {task['pane']}  \"{disp}\"\n"
+        f'next: task_wait(task_id="{resolved_id}")'
+    )
 
 
 def _get_single_task_output(
@@ -636,12 +643,11 @@ def task_output(
 @mcp.tool()
 @_plain_defaults
 def task_wait(task_id: str = None, pane: str = None) -> str:
-    """Return a shell command for Monitor that emits one line on task completion.
+    """Return an executable wrapper that emits one line on task completion.
 
-    Pass the returned string directly to Monitor's `command` parameter. Monitor
-    runs it in the background; when the task ends (or shows a failure
-    signature), Monitor delivers a notification line. Then call task_output to
-    read the body.
+    Run the wrapper with the current client's background completion facility.
+    When none exists, run it synchronously with the client's shell tool. After
+    the wrapper exits, call task_output to read the command body.
 
     Either task_id or pane must be provided.
     """
@@ -661,17 +667,17 @@ def poll_pane(
     i: bool = Field(False, description="case insensitive match"),
     F: bool = Field(False, description="literal string, not regex"),
 ) -> str:
-    """Return a shell command for Monitor that emits one line on first pattern match.
+    """Return an executable wrapper that emits one line on first pattern match.
 
-    Pass the returned string directly to Monitor's `command` parameter. Monitor
-    runs it in the background; when the pattern first appears in the pane,
-    Monitor delivers a notification line of the form '[match] <line>'.
+    Run the wrapper with the current client's background completion facility.
+    When none exists, run it synchronously with the client's shell tool. When
+    the pattern first appears, the wrapper prints '[match] <line>' and exits.
 
     only_new=True (default): only matches output produced AFTER this call. The
     fingerprint snapshot is taken NOW.
     only_new=False: also matches pre-existing content.
 
-    For multi-pane race, spawn multiple Monitors with separate poll_pane calls.
+    For a multi-pane race, start one wrapper per pane.
     """
     if not pattern:
         raise ValueError("pattern is required")
@@ -703,7 +709,14 @@ def task_list(all: bool = False) -> str:
             continue
         status = "error" if "error" in task else ("completed" if completed else "running")
         disp = tasks.cmd_display(task.get("command", ""))
-        lines.append(f"  {task_id} [{task['pane']}] [{task['type']}] [{status}] {elapsed:.1f}s  \"{disp}\"")
+        if completed:
+            next_action = f'task_output(task_id="{task_id}")'
+        else:
+            next_action = f'task_wait(task_id="{task_id}")'
+        lines.append(
+            f"  {task_id} [{task['pane']}] [{task['type']}] [{status}] "
+            f"{elapsed:.1f}s  \"{disp}\"  next={next_action}"
+        )
 
     if not lines:
         return "No running tasks"

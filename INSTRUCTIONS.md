@@ -20,13 +20,14 @@ Not a sandboxed subprocess: commands have real consequences in the user's enviro
 │       Default timeout=3s (capped at 60s).
 │       Completes within timeout → output returned.
 │       Exceeds timeout → auto-promotes; returned message contains task_id.
-│       For known-slow commands, see §8.
+│       Known-slow work leaves timeout unset and follows task_wait.
 │
 ├─ Enter or exit an interpreter / remote shell (prompt changes)
 │   └─→ xsh / xpy / xtcl with read_after=N
-│       Sends code, sleeps N seconds, returns the pane capture.
-│       Use whenever the prompt changes: default mode can't detect
-│       completion when the prompt itself is changing.
+│       This is a prompt-transition capture: it sends code, sleeps N seconds,
+│       and returns the pane content at that moment. Completion-tracked work
+│       uses default mode. Prompt transitions use read_after because the
+│       completion marker belongs to the previous prompt.
 │         xsh(pane, "python3", read_after=2)        # enter Python REPL
 │         xpy(pane, "exit()", read_after=1)         # exit Python REPL
 │         xsh(pane, "ssh server", read_after=2)     # enter remote shell
@@ -261,13 +262,11 @@ Timeout (default 3s, exceeded):
 
 User cancellation (CancelledError):
     Auto-converts to background task, same as timeout.
-    task_list() to find the converted task.
+    task_list() identifies it, then task_wait(task_id) waits once.
 
 Long EDA / training / build commands:
-    Override timeout up to 60s for inline wait:
-        xtcl(pane, "place_design", timeout=60)
-    Beyond 60s, the task auto-promotes. Follow §2 Long-running command
-    completion.
+    Leave timeout unset. The default timeout promotes the command before the
+    MCP client request expires. Follow §2 Long-running command completion.
 
 Exit commands change the prompt: default mode can't detect completion.
 Use read_after for exit:
