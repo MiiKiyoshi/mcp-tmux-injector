@@ -42,6 +42,10 @@ Not a sandboxed subprocess: commands have real consequences in the user's enviro
 │   └─→ poll_pane(pane, pattern, only_new=True|False)
 │       Returns a path to a wrapper script. Run via subprocess tool. The
 │       script prints "[match] <line>" when the pattern matches.
+│       For output whose arrival is SLOW or UNKNOWN (builds, long tasks).
+│       A prompt appearing within a second or two of your command
+│       (password, yes/no, REPL banner) is a prompt transition, not this:
+│       use read_after and read the screen in one call.
 │       only_new=True (default): match only output that appears AFTER this call
 │       only_new=False: also match content already on screen
 │
@@ -148,6 +152,8 @@ After respawn/create with cmd= (process starts immediately):
 
 Entering a remote shell:
     xsh(pane, "mlx2", read_after=2)         # kubectl exec, ssh, docker exec
+    xsh(pane, "ssh -p 8022 user@host", read_after=2)  # password prompt lands in this capture
+    send_text(pane, "<password>")           # only if a password is prompted
     xsh(pane, "hostname")                   # commands inside remote shell
     xsh(pane, "python3", read_after=2)      # REPL on the remote host
     xpy(pane, "print(1+1)")                 # xpy works there like a local REPL
