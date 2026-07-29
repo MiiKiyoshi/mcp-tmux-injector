@@ -55,21 +55,34 @@ Not a sandboxed subprocess: commands have real consequences in the user's enviro
 │         After read_after / send_text → only_new=True (default)
 │           output arrives after poll_pane snapshot is taken
 │
-├─ Know how much memory a pane is holding right now
-│   └─→ mem_pane(pane | panes=[...])
-│       Sums the pane's whole process tree (RSS + GPU), not just the
-│       foreground process, and names the heaviest processes. A tool that
-│       forks helpers under-reports badly if you only look at the fg pid.
+├─ Know how much memory is being held right now
+│   └─→ mem_pane(pane | panes=[...])       one pane, with its heaviest processes
+│       mem_pane(session="work")           table of every pane in it, plus Total
+│       mem_pane(session="*")              one row per session, host-wide
+│       Sums whole process trees (RSS + GPU), not just foreground processes:
+│       a tool that forks helpers under-reports badly if you only look at the
+│       fg pid. session= includes unregistered panes — memory does not care
+│       about registration.
 │
-├─ Get told when a pane's memory crosses a limit
-│   └─→ watch_mem(pane, rss_gb=..., gpu_gb=..., poll=30)
+├─ Get told when memory crosses a limit
+│   └─→ watch_mem(pane=... | session=..., rss_gb=..., gpu_gb=..., poll=30)
 │       Returns a path to a wrapper script. Start it with the client-specific
 │       completion flow in §2. Silent while under the cap; on the first breach
-│       prints "[cap] <pane>: RSS 42.3 GB > cap 40 GB | top: ... | host avail
-│       ... GB, swap used ... GB" and exits.
+│       prints a per-pane table with the Total and the host's remaining memory,
+│       then exits.
+│       Exactly one of pane / session. Prefer session when a job spans panes:
+│       two panes at 6 GiB each pass a 10 GiB per-pane cap while the session
+│       sits at 12 GiB, so a per-pane cap measures the wrong thing.
 │       Give rss_gb, gpu_gb, or both: whichever kind of blowup matters.
-│       Exits with "[gone]" if the tree ends, so silence never has to be
+│       Exits with "[gone]" if the trees end, so silence never has to be
 │       read as "still fine".
+│
+│         [cap] session marl_f4: CPU 10.9 GiB > cap 10.0 GiB
+│         PANE           CPU
+│         marl_f4:inn.0  6.6 GiB
+│         marl_f4:py.0   4.3 GiB
+│         Total          10.9 GiB
+│         host avail 371 GB, swap used 2.6 GB
 │
 ├─ Respond to prompt (password, yes/no)
 │   └─→ send_text (plain text, sends Enter by default)
@@ -86,8 +99,8 @@ Not a sandboxed subprocess: commands have real consequences in the user's enviro
 │
 └─ Check sessions, processes
     └─→ ls (compact overview), ls(session=) (detailed tree)
-        Memory is not here: use mem_pane, which sums a pane's whole
-        process tree instead of annotating a single pid.
+        Memory is not here: use mem_pane, which sums whole process trees
+        instead of annotating a single pid.
 ```
 
 ## 2. Common patterns

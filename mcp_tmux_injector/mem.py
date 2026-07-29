@@ -41,6 +41,30 @@ def proc_snapshot() -> tuple[dict[int, list[int]], dict[int, tuple[int, str]]]:
     return children, info
 
 
+def session_panes(session: str = None) -> list[tuple[str, str, int]]:
+    """[(session, pane_id, pane_shell_pid)] — one row per pane.
+
+    session=None sweeps every session, for a whole-host summary; naming one
+    restricts to it. Panes are reported whether or not they are registered
+    with this server: a memory blowup does not care about registration.
+    """
+    scope = ["-s", "-t", session] if session else ["-a"]
+    out = run_tmux_cmd(
+        ["list-panes", *scope, "-F",
+         "#{session_name}\t#{window_name}.#{pane_index}\t#{pane_pid}"],
+        raise_on_error=True,
+    )
+    rows: list[tuple[str, str, int]] = []
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 3 or not parts[2].isdigit():
+            continue
+        rows.append((parts[0], f"{parts[0]}:{parts[1]}", int(parts[2])))
+    if not rows:
+        raise ValueError(f"no panes found: {session or 'any session'}")
+    return rows
+
+
 def pane_pid(pane: str) -> int:
     """tmux pane id -> pid of the pane's shell.
 
@@ -137,6 +161,65 @@ def tree_gpu(root_pid: int, snapshot=None, gpu=None) -> tuple[int, list[tuple[in
         stack.extend(children.get(pid, ()))
     rows.sort(key=lambda r: -r[2])
     return total, rows
+
+
+def mem_rows(session: str = None, snapshot=None,
+             gpu: dict[int, int] = None) -> list[tuple[str, str, int, int]]:
+    """Per-pane memory across a session (or every session): [(session, pane, rss_kb, gpu_mib)].
+
+    One `ps` sweep is shared across all panes, so the rows are mutually
+    consistent — summing them gives a total that was true at one instant
+    rather than a drift of readings taken seconds apart.
+
+    gpu=None skips GPU accounting entirely; pass gpu_by_pid() to include it.
+    """
+    snap = snapshot if snapshot else proc_snapshot()
+    rows: list[tuple[str, str, int, int]] = []
+    for sess, pane, pid in session_panes(session):
+        rss, _ = tree_rss(pid, snap)
+        mib = tree_gpu(pid, snap, gpu)[0] if gpu is not None else 0
+        rows.append((sess, pane, rss, mib))
+    return rows
+
+
+def group_by_session(rows: list[tuple[str, str, int, int]]) -> list[tuple[str, int, int]]:
+    """Collapse per-pane rows to [(session, rss_kb, gpu_mib)], insertion order kept."""
+    acc: dict[str, list[int]] = {}
+    for sess, _pane, rss, mib in rows:
+        slot = acc.setdefault(sess, [0, 0])
+        slot[0] += rss
+        slot[1] += mib
+    return [(s, v[0], v[1]) for s, v in acc.items()]
+
+
+def fmt_gib(kb: int) -> str:
+    """kB -> binary size with one decimal (KiB/MiB/GiB), for table columns."""
+    if kb < 1024:
+        return f"{kb} KiB"
+    mib = kb / 1024
+    if mib < 1024:
+        return f"{mib:.1f} MiB"
+    return f"{mib / 1024:.1f} GiB"
+
+
+def fmt_table(rows: list[tuple[str, int, int]], header: str, gpu: bool = False) -> str:
+    """[(label, rss_kb, gpu_mib)] -> aligned table with a Total row.
+
+    A total is the whole point of asking at session scope — a host dies on the
+    sum, not on any single pane — so it is always appended, even for one row.
+    GPU shows '-' rather than '0.0 GiB' when nothing holds device memory, so a
+    machine without a GPU does not read as a machine with an idle one.
+    """
+    body = [(lbl, fmt_gib(rss), f"{mib / 1024:.1f} GiB" if mib else "-")
+            for lbl, rss, mib in rows]
+    body.append(("Total", fmt_gib(sum(r[1] for r in rows)),
+                 (f"{sum(r[2] for r in rows) / 1024:.1f} GiB"
+                  if any(r[2] for r in rows) else "-")))
+    cols = [header, "CPU"] + (["GPU"] if gpu else [])
+    body = [r[:len(cols)] for r in body]
+    widths = [max(len(c), *(len(r[i]) for r in body)) for i, c in enumerate(cols)]
+    fmt = "  ".join(f"{{:<{w}}}" for w in widths)
+    return "\n".join([fmt.format(*cols)] + [fmt.format(*r) for r in body])
 
 
 def fmt_kb(kb: int) -> str:

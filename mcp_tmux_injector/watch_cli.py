@@ -131,14 +131,17 @@ def build_watch_cmd_pane(pane: str, pattern: str, fp_path: Path,
     return write_watch_script(inner, extra_cleanup=[str(fp_path)])
 
 
-def build_watch_cmd_mem(pane: str, rss_gb: float | None,
+def build_watch_cmd_mem(pane: str | None, session: str | None, rss_gb: float | None,
                         gpu_gb: float | None, poll: float) -> str:
     """Wrap the memory watch invocation in a self-deleting script for Monitor."""
     parts = [
         f"{shlex.quote(SERVER_BIN)} watch mem",
-        f"--pane {shlex.quote(pane)}",
         f"--poll {poll}",
     ]
+    if session is not None:
+        parts.append(f"--session {shlex.quote(session)}")
+    else:
+        parts.append(f"--pane {shlex.quote(pane)}")
     if rss_gb is not None:
         parts.append(f"--rss-gb {rss_gb}")
     if gpu_gb is not None:
@@ -146,61 +149,75 @@ def build_watch_cmd_mem(pane: str, rss_gb: float | None,
     return write_watch_script(" ".join(parts))
 
 
-def _cli_watch_mem(pane: str, rss_gb: float | None,
+def _cli_watch_mem(pane: str | None, session: str | None, rss_gb: float | None,
                    gpu_gb: float | None, poll: float) -> int:
-    """Watch CLI: poll a pane's process tree, print one line when it crosses a cap.
+    """Watch CLI: poll a pane or a whole session, print a report when it crosses a cap.
 
     Exits on the first breach, so the notification IS the event. Fixed interval
     rather than the backoff the other watchers use: a cap breach is worth
     knowing about promptly, and each check is a single `ps` sweep.
 
+    Session scope exists because a cap on one pane measures the wrong thing
+    whenever a job spans several: a fold running Innovus in one pane and the
+    trainer in another sat at 6.4 + 4.2 GiB and never tripped a 10 GB per-pane
+    cap, while the number a human reads off the session was 10.6 GiB. The
+    breach report is a per-pane table so the total is immediately attributable.
+
     Also exits if the tree disappears — otherwise a watch on a finished job
     would sit armed until timeout, and silence would read as "still under cap".
     """
-    from .mem import (fmt_kb, gpu_by_pid, host_mem, pane_pid, proc_snapshot,
-                      tree_gpu, tree_rss)
+    from .mem import (fmt_gib, fmt_table, gpu_by_pid, host_mem, mem_rows,
+                      pane_pid, proc_snapshot, tree_gpu, tree_rss)
 
-    try:
-        root = pane_pid(pane)
-    except Exception as e:
-        print(f"[error] pane {pane}: {e}", flush=True)
-        return 1
-
+    scope = f"session {session}" if session else f"pane {pane}"
+    want_gpu = gpu_gb is not None
     rss_cap_kb = rss_gb * 1048576 if rss_gb is not None else None
     gpu_cap_mib = gpu_gb * 1024 if gpu_gb is not None else None
+
+    root = None
+    if session is None:
+        try:
+            root = pane_pid(pane)
+        except Exception as e:
+            print(f"[error] {scope}: {e}", flush=True)
+            return 1
 
     while True:
         try:
             snap = proc_snapshot()
-            rss_kb, rss_rows = tree_rss(root, snap)
-            if not rss_rows:
-                print(f"[gone] pane {pane}: process tree exited", flush=True)
+            gpu_map = gpu_by_pid() if want_gpu else None
+
+            if session is not None:
+                rows = [(p, rss, mib) for _s, p, rss, mib
+                        in mem_rows(session, snap, gpu_map)]
+                label = "PANE"
+            else:
+                rss_kb, _ = tree_rss(root, snap)
+                mib = tree_gpu(root, snap, gpu_map)[0] if want_gpu else 0
+                rows = [(pane, rss_kb, mib)]
+                label = "PANE"
+
+            total_kb = sum(r[1] for r in rows)
+            total_mib = sum(r[2] for r in rows)
+            if total_kb == 0:
+                print(f"[gone] {scope}: process tree exited", flush=True)
                 return 0
 
-            gpu_mib, gpu_rows = 0, []
-            if gpu_cap_mib is not None:
-                gpu_mib, gpu_rows = tree_gpu(root, snap, gpu_by_pid())
-
-            breach, rows, is_gpu = None, [], False
-            if rss_cap_kb is not None and rss_kb > rss_cap_kb:
-                breach = f"RSS {fmt_kb(rss_kb)} > cap {rss_gb} GB"
-                rows = rss_rows
-            elif gpu_cap_mib is not None and gpu_mib > gpu_cap_mib:
-                breach = f"GPU {gpu_mib / 1024:.2f} GB > cap {gpu_gb} GB"
-                rows, is_gpu = gpu_rows, True
+            breach = None
+            if rss_cap_kb is not None and total_kb > rss_cap_kb:
+                breach = f"CPU {fmt_gib(total_kb)} > cap {rss_gb} GiB"
+            elif gpu_cap_mib is not None and total_mib > gpu_cap_mib:
+                breach = f"GPU {total_mib / 1024:.1f} GiB > cap {gpu_gb} GiB"
 
             if breach:
-                top = ", ".join(
-                    f"{c}({p}) " + (f"{v / 1024:.2f} GB" if is_gpu else fmt_kb(v))
-                    for p, c, v in rows[:3]
-                )
                 hm = host_mem()
-                host = (f" | host avail {hm['available']:.0f} GB, "
+                host = (f"host avail {hm['available']:.0f} GB, "
                         f"swap used {hm['swap_used']:.1f} GB") if hm else ""
-                print(f"[cap] {pane}: {breach} | top: {top}{host}", flush=True)
+                table = fmt_table(rows, label, gpu=want_gpu)
+                print(f"[cap] {scope}: {breach}\n{table}\n{host}", flush=True)
                 return 0
         except Exception as e:
-            print(f"[error] pane {pane}: {e}", flush=True)
+            print(f"[error] {scope}: {e}", flush=True)
             return 1
         time.sleep(poll)
 
@@ -277,7 +294,8 @@ def cli_watch(args: list[str]) -> int:
     pp.add_argument("-F", dest="literal", action="store_true")
 
     pm = sub.add_parser("mem")
-    pm.add_argument("--pane", required=True)
+    pm.add_argument("--pane", default=None)
+    pm.add_argument("--session", default=None)
     pm.add_argument("--rss-gb", type=float, default=None)
     pm.add_argument("--gpu-gb", type=float, default=None)
     pm.add_argument("--poll", type=float, default=30.0)
@@ -286,7 +304,9 @@ def cli_watch(args: list[str]) -> int:
     if ns.kind == "task":
         return _cli_watch_task(ns.pane, ns.end, ns.task_id)
     if ns.kind == "mem":
-        return _cli_watch_mem(ns.pane, ns.rss_gb, ns.gpu_gb, ns.poll)
+        if (ns.pane is None) == (ns.session is None):
+            p.error("watch mem needs exactly one of --pane / --session")
+        return _cli_watch_mem(ns.pane, ns.session, ns.rss_gb, ns.gpu_gb, ns.poll)
     return _cli_watch_pane(
         ns.pane, ns.pattern, Path(ns.fingerprint_file),
         ns.fingerprint_total, ns.only_new, ns.ignore_case, ns.literal,

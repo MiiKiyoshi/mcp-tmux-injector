@@ -665,6 +665,7 @@ def task_wait(task_id: str = None, pane: str = None) -> str:
 def mem_pane(
     pane: str = None,
     panes: list[str] = Field(None, description="several panes at once"),
+    session: str = Field(None, description="whole session: per-pane table plus total. '*' = one row per session, host-wide."),
     gpu: bool = Field(True, description="include GPU memory (skip if nvidia-smi is slow or absent)"),
 ) -> str:
     """Memory held by a pane's process tree, right now — host RSS and GPU.
@@ -674,8 +675,30 @@ def mem_pane(
     otherwise under-report badly. Lists the heaviest processes so a blowup can
     be attributed.
 
+    `session=` aggregates instead, as a table with a total. A job split across
+    panes — EDA tool in one, trainer in another — is only meaningful as a
+    session total, and that total is the number a human reads off the session
+    list; a per-pane view of it under-reports by design. `session='*'` gives
+    one row per session across the host. Unregistered panes are included:
+    memory does not care about registration.
+
     For a threshold that notifies you instead of being polled, use watch_mem.
     """
+    if session is not None:
+        snap = memmod.proc_snapshot()
+        gpu_map = memmod.gpu_by_pid() if gpu else None
+        if session == "*":
+            rows = memmod.group_by_session(memmod.mem_rows(None, snap, gpu_map))
+            table = memmod.fmt_table(rows, "SESSION", gpu=gpu)
+        else:
+            rows = [(p, rss, mib) for _s, p, rss, mib
+                    in memmod.mem_rows(session, snap, gpu_map)]
+            table = memmod.fmt_table(rows, "PANE", gpu=gpu)
+        hm = memmod.host_mem()
+        host = (f"\nhost: {hm['available']:.0f} GB available of {hm['total']:.0f} GB, "
+                f"swap used {hm['swap_used']:.1f} GB") if hm else ""
+        return table + host
+
     targets = _resolve_panes(pane, panes)
     snap = memmod.proc_snapshot()
     gpu_map = memmod.gpu_by_pid() if gpu else {}
@@ -707,27 +730,38 @@ def mem_pane(
 @mcp.tool()
 @_plain_defaults
 def watch_mem(
-    pane: str,
-    rss_gb: float = Field(None, description="host RSS cap in GB for the pane's process tree"),
-    gpu_gb: float = Field(None, description="GPU memory cap in GB for the same tree"),
+    pane: str = None,
+    session: str = Field(None, description="watch a whole session's combined usage instead of one pane"),
+    rss_gb: float = Field(None, description="host RSS cap in GiB for the watched process trees"),
+    gpu_gb: float = Field(None, description="GPU memory cap in GiB for the same trees"),
     poll: float = Field(30.0, description="seconds between checks"),
 ) -> str:
-    """Return a shell command for Monitor that emits one line when a pane exceeds a memory cap.
+    """Return a shell command for Monitor that reports when a pane or session exceeds a memory cap.
 
     Same shape as task_wait / poll_pane: pass the returned string to Monitor's
-    `command`. It stays quiet while the pane is under the cap and delivers one
-    notification on the first breach, naming the heaviest processes and the
-    host's remaining memory, then exits.
+    `command`. It stays quiet under the cap and delivers one notification on the
+    first breach — a per-pane table with the total and the host's remaining
+    memory — then exits.
+
+    Give exactly one of pane / session. Prefer `session` when a job spans
+    several panes: capping each pane separately measures the wrong thing, since
+    two panes at 6 GiB each pass a 10 GiB per-pane cap while the session sits
+    at 12 GiB. The table in the breach report attributes the total back to panes.
 
     At least one of rss_gb / gpu_gb is required; give both to catch either kind
-    of blowup. It also exits with '[gone]' if the pane's process tree ends, so
-    silence never has to be interpreted as "still fine".
+    of blowup. It also exits with '[gone]' if the watched trees end, so silence
+    never has to be interpreted as "still fine".
     """
     if rss_gb is None and gpu_gb is None:
         raise ValueError("give rss_gb and/or gpu_gb")
-    require_pane(pane)
-    memmod.pane_pid(pane)   # fail now if the pane is bad, not inside Monitor
-    return build_watch_cmd_mem(pane, rss_gb, gpu_gb, poll)
+    if (pane is None) == (session is None):
+        raise ValueError("give exactly one of pane / session")
+    if session is not None:
+        memmod.session_panes(session)   # fail now, not inside Monitor
+    else:
+        require_pane(pane)
+        memmod.pane_pid(pane)
+    return build_watch_cmd_mem(pane, session, rss_gb, gpu_gb, poll)
 
 
 @mcp.tool()

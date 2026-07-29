@@ -13,7 +13,7 @@ CLI agents can't natively talk to a live REPL or a long-running shell. This serv
   - `read_after=N` skips the wait-for-completion logic: sends the code, sleeps N seconds, returns the pane's screen content. Use when the prompt itself is changing (entering a REPL, ssh, exit).
 - **Get notified when something finishes**: `task_wait(task_id)` and `poll_pane(pattern)` return a small wrapper script. Run it with the client-specific completion flow in [INSTRUCTIONS.md](INSTRUCTIONS.md); when the task completes or the pattern matches, the script prints one line and exits. Then `task_output(task_id)` returns the full body.
 - **Save output to a file**: `task_output(save=path)` and `capture_pane(save=path)` write filtered output to disk.
-- **Memory, per pane**: `mem_pane` sums a pane's whole process tree (host RSS + GPU), so a tool that forks helpers is accounted for. `watch_mem(pane, rss_gb=…, gpu_gb=…)` returns a wrapper script in the same style as `task_wait`: quiet under the cap, one notification line on the first breach.
+- **Memory, per pane or per session**: `mem_pane` sums whole process trees (host RSS + GPU), so a tool that forks helpers is accounted for. `mem_pane(session=…)` gives a per-pane table with a total, `session="*"` one row per session. `watch_mem(pane=… | session=…, rss_gb=…, gpu_gb=…)` returns a wrapper script in the same style as `task_wait`: quiet under the cap, one breach report with the table.
 - **Per-pane locking**: only one injected command runs on a pane at a time.
 - **Multi-pane dispatch**: `panes=[…]` with either `code=` (same code to all) or `codes=[…]` (different code per pane).
 - **Works over ssh**: a pane that is ssh'd into another machine, or running a REPL there, behaves the same as a local one. Code is delivered as keystrokes, so nothing needs to exist on the remote filesystem: `file=` included.
@@ -76,15 +76,23 @@ The agent dispatches to multiple panes via `panes=` + `codes=`.
 "Show the current status of each pane in the work session"
 ```
 
-`ls(session="work")` shows PID, process, and cwd per pane. For memory, `mem_pane` sums the pane's whole process tree.
+`ls(session="work")` shows PID, process, and cwd per pane. For memory, `mem_pane` sums whole process trees:
+
+```
+mem_pane(session="*")        mem_pane(session="marl_f4")
+SESSION  CPU       GPU       PANE           CPU       GPU
+marl_f1  10.3 GiB  -         marl_f4:inn.0  6.6 GiB   -
+marl_f4  10.9 GiB  -         marl_f4:py.0   4.3 GiB   -
+Total    21.2 GiB  -         Total          10.9 GiB  -
+```
 
 **Catch a runaway before it takes the host down**
 
 ```
-"Tell me if the training pane goes over 40 GB"
+"Tell me if the training session goes over 40 GB"
 ```
 
-`watch_mem(pane, rss_gb=40)` returns a wrapper script; run it with the client-specific completion flow in [INSTRUCTIONS.md](INSTRUCTIONS.md). It stays quiet while the pane is under the cap and delivers one line on the first breach, naming the heaviest processes and what the host has left.
+`watch_mem(session="work", rss_gb=40)` returns a wrapper script; run it with the client-specific completion flow in [INSTRUCTIONS.md](INSTRUCTIONS.md). It stays quiet under the cap and delivers the table above on the first breach, plus what the host has left. Watch the session rather than a pane when a job spans several — two panes at 6 GiB each pass a 10 GiB per-pane cap while the session sits at 12 GiB.
 
 ## Configuration
 
