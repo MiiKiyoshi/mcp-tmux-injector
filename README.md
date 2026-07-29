@@ -13,6 +13,7 @@ CLI agents can't natively talk to a live REPL or a long-running shell. This serv
   - `read_after=N` skips the wait-for-completion logic: sends the code, sleeps N seconds, returns the pane's screen content. Use when the prompt itself is changing (entering a REPL, ssh, exit).
 - **Get notified when something finishes**: `task_wait(task_id)` and `poll_pane(pattern)` return a small wrapper script. Run it with the client-specific completion flow in [INSTRUCTIONS.md](INSTRUCTIONS.md); when the task completes or the pattern matches, the script prints one line and exits. Then `task_output(task_id)` returns the full body.
 - **Save output to a file**: `task_output(save=path)` and `capture_pane(save=path)` write filtered output to disk.
+- **Memory, per pane**: `mem_pane` sums a pane's whole process tree (host RSS + GPU), so a tool that forks helpers is accounted for. `watch_mem(pane, rss_gb=…, gpu_gb=…)` returns a wrapper script in the same style as `task_wait`: quiet under the cap, one notification line on the first breach.
 - **Per-pane locking**: only one injected command runs on a pane at a time.
 - **Multi-pane dispatch**: `panes=[…]` with either `code=` (same code to all) or `codes=[…]` (different code per pane).
 - **Works over ssh**: a pane that is ssh'd into another machine, or running a REPL there, behaves the same as a local one. Code is delivered as keystrokes, so nothing needs to exist on the remote filesystem: `file=` included.
@@ -77,6 +78,16 @@ The agent dispatches to multiple panes via `panes=` + `codes=`.
 
 `ls(session="work", gpu=True)` shows PID, process, cwd, and GPU memory per pane.
 
+**Catch a runaway before it takes the host down**
+
+```
+"Tell me if the training pane goes over 40 GB"
+```
+
+`watch_mem(pane, rss_gb=40)` returns a wrapper script for Monitor. It stays
+quiet while the pane is under the cap and delivers one line on the first
+breach, naming the heaviest processes and what the host has left.
+
 ## Configuration
 
 Optional settings at `~/.config/mcp-tmux-injector/config.json`:
@@ -114,6 +125,7 @@ mcp_tmux_injector/
   filters.py    output filtering (tqdm/grep/dedupe/save)
   tasks.py      background task registry, pane locks
   registry.py   pane/session registration, ownership, cleanup
+  mem.py        per-pane process-tree memory (host RSS + GPU), host totals
   watch_cli.py  standalone watch CLI + poll fingerprints
   server.py     MCP tool definitions, entry point
 tests/
