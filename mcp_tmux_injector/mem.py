@@ -80,11 +80,34 @@ def pane_pid(pane: str) -> int:
     return int(out)
 
 
-def tree_rss(root_pid: int, snapshot=None) -> tuple[int, list[tuple[int, str, int]]]:
-    """Total RSS (kB) of root_pid and all descendants, plus the per-process rows.
+def pss_kb(pid: int, fallback: int) -> int:
+    """Proportional set size in kB — shared pages split among their sharers.
 
-    Rows come back sorted heaviest first, which is what you want when a pane
-    blows up and you need to know which process did it.
+    RSS counts a shared page in full for every process mapping it, so summing
+    RSS across a tree over-reports whenever a program forks workers. Measured
+    on a live EDA tool: an Innovus parent plus one forked child read 20.0 GiB
+    by RSS and 2.1 GiB by PSS. A per-tree total has to use PSS or it is fiction.
+
+    Falls back to the caller's RSS when smaps_rollup cannot be read (process
+    gone, or owned by someone else) — over-reporting, never under-reporting.
+    """
+    try:
+        with open(f"/proc/{pid}/smaps_rollup") as f:
+            for line in f:
+                if line.startswith("Pss:"):
+                    return int(line.split()[1])
+    except (OSError, ValueError):
+        pass
+    return fallback
+
+
+def tree_rss(root_pid: int, snapshot=None) -> tuple[int, list[tuple[int, str, int]]]:
+    """Total memory (kB) of root_pid and all descendants, plus per-process rows.
+
+    Per-process values are PSS, so the total is meaningful to compare against a
+    cap rather than inflated by every page a forked worker shares with its
+    parent. Rows come back sorted heaviest first, which is what you want when a
+    pane blows up and you need to know which process did it.
     """
     children, info = snapshot if snapshot else proc_snapshot()
     total = 0
@@ -98,15 +121,16 @@ def tree_rss(root_pid: int, snapshot=None) -> tuple[int, list[tuple[int, str, in
         seen.add(pid)
         if pid in info:
             rss, comm = info[pid]
-            total += rss
-            rows.append((pid, comm, rss))
+            mem = pss_kb(pid, rss)
+            total += mem
+            rows.append((pid, comm, mem))
         stack.extend(children.get(pid, ()))
     rows.sort(key=lambda r: -r[2])
     return total, rows
 
 
 def pane_rss(pane: str, snapshot=None) -> tuple[int, list[tuple[int, str, int]]]:
-    """Convenience: resolve the pane then sum its tree."""
+    """Convenience: resolve the pane then sum its tree (PSS)."""
     return tree_rss(pane_pid(pane), snapshot)
 
 
