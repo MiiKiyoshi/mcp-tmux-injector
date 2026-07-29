@@ -26,8 +26,10 @@ from .config import FINGERPRINT_DIR, INSTRUCTIONS, check_deny
 from .filters import apply_output_filters, parse_rel_range
 from .registry import EXTERNAL, MANAGED, check_pane_registered, require_pane
 from .tmux import check_session, run_tmux_cmd
+from . import mem as memmod
 from .watch_cli import (
     build_fingerprint,
+    build_watch_cmd_mem,
     build_watch_cmd_pane,
     build_watch_cmd_task,
     cli_watch,
@@ -656,6 +658,76 @@ def task_wait(task_id: str = None, pane: str = None) -> str:
     if "end_time" in task:
         return f"echo '[done] task {resolved_id} (already complete)'"
     return build_watch_cmd_task(resolved_id, task["pane"], task["end"])
+
+
+@mcp.tool()
+@_plain_defaults
+def mem_pane(
+    pane: str = None,
+    panes: list[str] = Field(None, description="several panes at once"),
+    gpu: bool = Field(True, description="include GPU memory (skip if nvidia-smi is slow or absent)"),
+) -> str:
+    """Memory held by a pane's process tree, right now — host RSS and GPU.
+
+    Sums the whole tree under the pane's shell, not just the foreground
+    process: a pane running an EDA tool or a trainer that forks helpers would
+    otherwise under-report badly. Lists the heaviest processes so a blowup can
+    be attributed.
+
+    For a threshold that notifies you instead of being polled, use watch_mem.
+    """
+    targets = _resolve_panes(pane, panes)
+    snap = memmod.proc_snapshot()
+    gpu_map = memmod.gpu_by_pid() if gpu else {}
+    out = []
+    for p in targets:
+        require_pane(p)
+        try:
+            root = memmod.pane_pid(p)
+        except Exception as e:
+            out.append(f"{p}: error ({e})")
+            continue
+        rss_kb, rss_rows = memmod.tree_rss(root, snap)
+        line = f"{p}: RSS {memmod.fmt_kb(rss_kb)}"
+        if gpu:
+            gpu_mib, gpu_rows = memmod.tree_gpu(root, snap, gpu_map)
+            if gpu_mib:
+                line += f" | GPU {gpu_mib / 1024:.2f} GB"
+        if rss_rows:
+            top = ", ".join(f"{c}({i}) {memmod.fmt_kb(v)}" for i, c, v in rss_rows[:3])
+            line += f"\n    top: {top}"
+        out.append(line)
+    hm = memmod.host_mem()
+    if hm:
+        out.append(f"host: {hm['available']:.0f} GB available of {hm['total']:.0f} GB, "
+                   f"swap used {hm['swap_used']:.1f} GB")
+    return "\n".join(out)
+
+
+@mcp.tool()
+@_plain_defaults
+def watch_mem(
+    pane: str,
+    rss_gb: float = Field(None, description="host RSS cap in GB for the pane's process tree"),
+    gpu_gb: float = Field(None, description="GPU memory cap in GB for the same tree"),
+    poll: float = Field(30.0, description="seconds between checks"),
+) -> str:
+    """Return a shell command for Monitor that emits one line when a pane exceeds a memory cap.
+
+    Same shape as task_wait / poll_pane: pass the returned string to Monitor's
+    `command`. It stays quiet while the pane is under the cap and delivers one
+    notification on the first breach, naming the heaviest processes and the
+    host's remaining memory, then exits.
+
+    At least one of rss_gb / gpu_gb is required; give both to catch either kind
+    of blowup. It also exits with '[gone]' if the pane's process tree ends, so
+    silence never has to be interpreted as "still fine".
+    """
+    if rss_gb is None and gpu_gb is None:
+        raise ValueError("give rss_gb and/or gpu_gb")
+    require_pane(pane)
+    memmod.pane_pid(pane)   # fail now if the pane is bad, not inside Monitor
+    return build_watch_cmd_mem(pane, rss_gb, gpu_gb, poll)
 
 
 @mcp.tool()

@@ -55,6 +55,22 @@ Not a sandboxed subprocess: commands have real consequences in the user's enviro
 │         After read_after / send_text → only_new=True (default)
 │           output arrives after poll_pane snapshot is taken
 │
+├─ Know how much memory a pane is holding right now
+│   └─→ mem_pane(pane | panes=[...])
+│       Sums the pane's whole process tree (RSS + GPU), not just the
+│       foreground process, and names the heaviest processes. A tool that
+│       forks helpers under-reports badly if you only look at the fg pid.
+│
+├─ Get told when a pane's memory crosses a limit
+│   └─→ watch_mem(pane, rss_gb=..., gpu_gb=..., poll=30)
+│       Returns a path to a wrapper script. Start it with the client-specific
+│       completion flow in §2. Silent while under the cap; on the first breach
+│       prints "[cap] <pane>: RSS 42.3 GB > cap 40 GB | top: ... | host avail
+│       ... GB, swap used ... GB" and exits.
+│       Give rss_gb, gpu_gb, or both — whichever kind of blowup matters.
+│       Exits with "[gone]" if the tree ends, so silence never has to be
+│       read as "still fine".
+│
 ├─ Respond to prompt (password, yes/no)
 │   └─→ send_text (plain text, sends Enter by default)
 │
