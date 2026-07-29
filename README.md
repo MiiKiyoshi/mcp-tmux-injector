@@ -76,7 +76,7 @@ The agent dispatches to multiple panes via `panes=` + `codes=`.
 "Show the current status of each pane in the work session"
 ```
 
-`ls(session="work", gpu=True)` shows PID, process, cwd, and GPU memory per pane.
+`ls(session="work")` shows PID, process, and cwd per pane. For memory, `mem_pane` sums the pane's whole process tree.
 
 **Catch a runaway before it takes the host down**
 
@@ -84,9 +84,7 @@ The agent dispatches to multiple panes via `panes=` + `codes=`.
 "Tell me if the training pane goes over 40 GB"
 ```
 
-`watch_mem(pane, rss_gb=40)` returns a wrapper script for Monitor. It stays
-quiet while the pane is under the cap and delivers one line on the first
-breach, naming the heaviest processes and what the host has left.
+`watch_mem(pane, rss_gb=40)` returns a wrapper script; run it with the client-specific completion flow in [INSTRUCTIONS.md](INSTRUCTIONS.md). It stays quiet while the pane is under the cap and delivers one line on the first breach, naming the heaviest processes and what the host has left.
 
 ## Configuration
 
