@@ -880,29 +880,9 @@ def _ls_collect(session: str, window: str) -> tuple[list[tuple] | None, set[str]
     for sess, widx, wname, auto_rename, pidx, tty, cwd, ppid in raw_panes:
         fg = fg_procs.get(tty) if tty else None
         proc = fg[0] if fg else "-"
-        fg_pid = fg[1] if fg else ppid  # foreground process PID for GPU lookup
+        fg_pid = fg[1] if fg else ppid
         pane_data.append((sess, widx, wname, auto_rename, pidx, proc, cwd, ppid, fg_pid))
     return pane_data, live_pane_ids
-
-
-def _gpu_by_pid() -> dict[str, str]:
-    """Map PID -> 'cuda:N <mem>M' via gpustat."""
-    gpu_map = {}
-    try:
-        gs = subprocess.run(
-            ["gpustat", "-p", "--no-header"],
-            capture_output=True, text=True, timeout=3
-        )
-        for gl in gs.stdout.strip().split('\n'):
-            gm = re.match(r'\[(\d+)\]', gl)
-            if not gm:
-                continue
-            gi = int(gm.group(1))
-            for pm in re.finditer(r'/(\d+)\((\d+)M\)', gl):
-                gpu_map[pm.group(1)] = f"cuda:{gi} {pm.group(2)}M"
-    except Exception:
-        pass
-    return gpu_map
 
 
 def _ls_compact(pane_data: list[tuple], sessions_meta: dict) -> str:
@@ -924,9 +904,8 @@ def _ls_compact(pane_data: list[tuple], sessions_meta: dict) -> str:
     return '\n'.join(output)
 
 
-def _ls_detailed(pane_data: list[tuple], sessions_meta: dict, gpu: bool) -> list[str]:
+def _ls_detailed(pane_data: list[tuple], sessions_meta: dict) -> list[str]:
     """Full tree with PID, process, cwd, registration and task annotations."""
-    gpu_map = _gpu_by_pid() if gpu else {}
     output = []
     prev_sess = None
     prev_widx = None
@@ -971,23 +950,22 @@ def _ls_detailed(pane_data: list[tuple], sessions_meta: dict, gpu: bool) -> list
         home = os.path.expanduser("~")
         cwd = cwd.replace(home, "~")
         proc = proc.replace(home, "~")
-        gpu_str = f"  [{gpu_map[fg_pid]}]" if fg_pid in gpu_map else ""
-        output.append(f"    {pidx}: [{ppid}] {proc}  \"{cwd}\"{gpu_str}{reg_str}{task_str}")
+        output.append(f"    {pidx}: [{ppid}] {proc}  \"{cwd}\"{reg_str}{task_str}")
     return output
 
 
 @mcp.tool()
 @_plain_defaults
-def ls(session: str = None, window: str = None, gpu: bool = False) -> str:
+def ls(session: str = None, window: str = None) -> str:
     """List tmux sessions/windows/panes as a tree.
 
     Without session: compact summary (session name, status, window count).
     With session: detailed tree with PID, process, cwd.
-    With gpu=True: adds per-pane GPU device and memory from gpustat."""
+
+    For memory (host RSS and GPU) use mem_pane: it sums a pane's whole process
+    tree, which is what actually matters, rather than annotating one pid."""
     if window and not session:
         raise ValueError("'window' requires 'session'")
-    if gpu and not session:
-        raise ValueError("'gpu' requires 'session'")
 
     pane_data, live_pane_ids = _ls_collect(session, window)
     if pane_data is None:
@@ -1004,7 +982,7 @@ def ls(session: str = None, window: str = None, gpu: bool = False) -> str:
     if not session:
         return _ls_compact(pane_data, sessions_meta)
 
-    output = _ls_detailed(pane_data, sessions_meta, gpu)
+    output = _ls_detailed(pane_data, sessions_meta)
     if not output:
         return f"Session '{session}' not found"
     return '\n'.join(output)

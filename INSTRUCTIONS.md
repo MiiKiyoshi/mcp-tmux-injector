@@ -67,7 +67,7 @@ Not a sandboxed subprocess: commands have real consequences in the user's enviro
 │       completion flow in §2. Silent while under the cap; on the first breach
 │       prints "[cap] <pane>: RSS 42.3 GB > cap 40 GB | top: ... | host avail
 │       ... GB, swap used ... GB" and exits.
-│       Give rss_gb, gpu_gb, or both — whichever kind of blowup matters.
+│       Give rss_gb, gpu_gb, or both: whichever kind of blowup matters.
 │       Exits with "[gone]" if the tree ends, so silence never has to be
 │       read as "still fine".
 │
@@ -84,8 +84,10 @@ Not a sandboxed subprocess: commands have real consequences in the user's enviro
 ├─ Check current screen
 │   └─→ capture_pane
 │
-└─ Check sessions, processes, GPU memory
-    └─→ ls (compact overview), ls(session=, gpu=True) (detailed + GPU)
+└─ Check sessions, processes
+    └─→ ls (compact overview), ls(session=) (detailed tree)
+        Memory is not here: use mem_pane, which sums a pane's whole
+        process tree instead of annotating a single pid.
 ```
 
 ## 2. Common patterns
