@@ -14,7 +14,12 @@ _pane_locks: dict[str, threading.Lock] = {}
 _pane_locks_lock = threading.Lock()  # Lock for accessing _pane_locks dict
 
 _MAX_COMPLETED_TASKS = 20
-BLOCKING_TIMEOUT_MAX = 60.0
+import os as _os
+
+# MCP clients like Claude Code expire requests around 60s, so blocking waits
+# are capped and long work auto-promotes to a task. Clients WITHOUT that
+# expiry (e.g. opencode harness containers) may raise the cap via env.
+BLOCKING_TIMEOUT_MAX = float(_os.environ.get("TMUX_INJECTOR_BLOCKING_MAX", "60"))
 
 
 def get_pane_lock(pane: str) -> threading.Lock:
