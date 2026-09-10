@@ -1,9 +1,7 @@
 """MCP tool definitions and server entry point."""
 import asyncio
 import functools
-import json
 import os
-import random
 import re
 import subprocess
 import threading
@@ -13,7 +11,7 @@ from urllib.parse import urlparse
 from mcp.server.fastmcp import FastMCP, Context
 from pydantic import Field
 
-from . import registry, tasks, tmux
+from . import events, registry, tasks, tmux, watch
 from .codec import (
     generate_marker,
     generate_task_id_and_marker,
@@ -22,18 +20,11 @@ from .codec import (
     send_shell_code,
     send_tcl_code,
 )
-from .config import FINGERPRINT_DIR, INSTRUCTIONS, check_deny
+from .config import INSTRUCTIONS, check_deny
 from .filters import apply_output_filters, parse_rel_range
 from .registry import EXTERNAL, MANAGED, check_pane_registered, require_pane
 from .tmux import check_session, run_tmux_cmd
 from . import mem as memmod
-from .watch_cli import (
-    build_fingerprint,
-    build_watch_cmd_mem,
-    build_watch_cmd_pane,
-    build_watch_cmd_task,
-    cli_watch,
-)
 
 mcp = FastMCP("tmux-injector", instructions=INSTRUCTIONS)
 
@@ -247,7 +238,8 @@ async def _blocking_on_pane(p: str, code: str, send_fn, timeout: float, filter_k
         threading.Thread(target=tasks.watch_task_completion, args=(task_id,), daemon=True).start()
         return (
             f"[task promoted] {task_id} ({p}, {timeout}s)\n"
-            f'continue with task_wait(task_id="{task_id}")'
+            f"[done] arrives on the event stream; end the turn."
+            + events.waiter_note()
         )
     except asyncio.CancelledError:
         tasks._tasks[task_id] = {
@@ -525,7 +517,7 @@ def task_status(task_id: str = None, pane: str = None) -> str:
     elapsed = time.time() - task["start_time"]
     return (
         f"[running] {elapsed:.1f}s  {task['pane']}  \"{disp}\"\n"
-        f'next: task_wait(task_id="{resolved_id}")'
+        f"next: [done] arrives on the event stream" + events.waiter_note()
     )
 
 
@@ -644,24 +636,6 @@ def task_output(
 
 @mcp.tool()
 @_plain_defaults
-def task_wait(task_id: str = None, pane: str = None) -> str:
-    """Return an executable wrapper that emits one line on task completion.
-
-    Run the wrapper with the current client's background completion facility.
-    When none exists, run it synchronously with the client's shell tool. After
-    the wrapper exits, call task_output to read the command body.
-
-    Either task_id or pane must be provided.
-    """
-    resolved_id = _resolve_task_id(task_id, pane)
-    task = _get_task(resolved_id)
-    if "end_time" in task:
-        return f"echo '[done] task {resolved_id} (already complete)'"
-    return build_watch_cmd_task(resolved_id, task["pane"], task["end"])
-
-
-@mcp.tool()
-@_plain_defaults
 def mem_pane(
     pane: str = None,
     panes: list[str] = Field(None, description="several panes at once"),
@@ -736,12 +710,11 @@ def watch_mem(
     gpu_gb: float = Field(None, description="GPU memory cap in GiB for the same trees"),
     poll: float = Field(30.0, description="seconds between checks"),
 ) -> str:
-    """Return a shell command for Monitor that reports when a pane or session exceeds a memory cap.
+    """Report on the event stream when a pane or session exceeds a memory cap.
 
-    Same shape as task_wait / poll_pane: pass the returned string to Monitor's
-    `command`. It stays quiet under the cap and delivers one notification on the
-    first breach — a per-pane table with the total and the host's remaining
-    memory — then exits.
+    Returns at once. The watch stays quiet under the cap and puts one report on
+    the event stream on the first breach: a per-pane table with the total and
+    the host's remaining memory. Then the watch ends.
 
     Give exactly one of pane / session. Prefer `session` when a job spans
     several panes: capping each pane separately measures the wrong thing, since
@@ -749,7 +722,7 @@ def watch_mem(
     at 12 GiB. The table in the breach report attributes the total back to panes.
 
     At least one of rss_gb / gpu_gb is required; give both to catch either kind
-    of blowup. It also exits with '[gone]' if the watched trees end, so silence
+    of blowup. It also reports '[gone]' if the watched trees end, so silence
     never has to be interpreted as "still fine".
     """
     if rss_gb is None and gpu_gb is None:
@@ -757,11 +730,14 @@ def watch_mem(
     if (pane is None) == (session is None):
         raise ValueError("give exactly one of pane / session")
     if session is not None:
-        memmod.session_panes(session)   # fail now, not inside Monitor
+        memmod.session_panes(session)   # fail now, not inside the thread
     else:
         require_pane(pane)
         memmod.pane_pid(pane)
-    return build_watch_cmd_mem(pane, session, rss_gb, gpu_gb, poll)
+    threading.Thread(target=watch.watch_mem, args=(pane, session, rss_gb, gpu_gb, poll), daemon=True).start()
+    scope = f"session {session}" if session else f"pane {pane}"
+    caps = ", ".join(c for c in [f"rss {rss_gb} GiB" if rss_gb else "", f"gpu {gpu_gb} GiB" if gpu_gb else ""] if c)
+    return f"[watching] {scope} ({caps}, every {poll:g}s); [cap] or [gone] arrives on the event stream." + events.waiter_note()
 
 
 @mcp.tool()
@@ -773,28 +749,40 @@ def poll_pane(
     i: bool = Field(False, description="case insensitive match"),
     F: bool = Field(False, description="literal string, not regex"),
 ) -> str:
-    """Return an executable wrapper that emits one line on first pattern match.
+    """Report on the event stream when a pattern first appears in a pane.
 
-    Run the wrapper with the current client's background completion facility.
-    When none exists, run it synchronously with the client's shell tool. When
-    the pattern first appears, the wrapper prints '[match] <line>' and exits.
+    Returns at once. When the pattern first appears, '[match] <pane>: <line>'
+    is put on the event stream and the watch ends.
 
     only_new=True (default): only matches output produced AFTER this call. The
     fingerprint snapshot is taken NOW.
     only_new=False: also matches pre-existing content.
 
-    For a multi-pane race, start one wrapper per pane.
+    For a multi-pane race, start one watch per pane.
     """
     if not pattern:
         raise ValueError("pattern is required")
     require_pane(pane)
 
-    fp_lines, fp_total = build_fingerprint(pane) if only_new else ([], 0)
-    FINGERPRINT_DIR.mkdir(parents=True, exist_ok=True)
-    fp_path = FINGERPRINT_DIR / f"fp_{int(time.time()*1000)}_{random.randint(0, 0xFFFF):04x}.json"
-    fp_path.write_text(json.dumps({"lines": fp_lines, "total": fp_total}))
+    fp_lines, fp_total = watch.build_fingerprint(pane) if only_new else ([], 0)
+    threading.Thread(target=watch.watch_pane, args=(pane, pattern, fp_lines, fp_total, only_new, i, F), daemon=True).start()
+    return f"[watching] {pane} for /{pattern}/; [match] arrives on the event stream." + events.waiter_note()
 
-    return build_watch_cmd_pane(pane, pattern, fp_path, fp_total, only_new, i, F)
+
+@mcp.tool()
+def wait_events() -> str:
+    """Return this session's event stream script. Start it once with the client's persistent background monitor (Claude Code: Monitor with persistent=true) and end the turn. It prints one line per event ([done] task, [match] pattern, [cap]/[gone] memory, [error]) and keeps waiting, so it is never started again; nothing per task is registered. Costs nothing while waiting."""
+    path = events.write_script()
+    if events.waiter_alive():
+        return f"[running] the event stream is already being watched; do not start it again.\nscript: {path}"
+    pending = events.unread()
+    note = f" {pending} event(s) are already waiting and print at once." if pending else ""
+    return (
+        f"script: {path}\n"
+        f"Start it once and end the turn.{note}\n"
+        f"Claude Code: Monitor(command=\"{path}\", description=\"tmux-injector events\", persistent=true, timeout_ms=3600000)\n"
+        f"A client whose shell tool can only block runs `{path} --once`: it returns at the next event."
+    )
 
 
 @mcp.tool()
@@ -818,7 +806,7 @@ def task_list(all: bool = False) -> str:
         if completed:
             next_action = f'task_output(task_id="{task_id}")'
         else:
-            next_action = f'task_wait(task_id="{task_id}")'
+            next_action = "[done] on the event stream"
         lines.append(
             f"  {task_id} [{task['pane']}] [{task['type']}] [{status}] "
             f"{elapsed:.1f}s  \"{disp}\"  next={next_action}"
@@ -1331,12 +1319,10 @@ def capture_pane(
 
 
 def main():
-    import sys
-    if len(sys.argv) > 1 and sys.argv[1] == "watch":
-        sys.exit(cli_watch(sys.argv[2:]))
     # Strip .venv from PATH so tmux panes don't inherit virtualenv pollution
     os.environ["PATH"] = ":".join(
         p for p in os.environ.get("PATH", "").split(":") if "/.venv/" not in p
     )
     os.environ.pop("VIRTUAL_ENV", None)
+    events.init()
     mcp.run(transport="stdio")

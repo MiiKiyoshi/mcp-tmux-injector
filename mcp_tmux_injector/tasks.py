@@ -3,6 +3,7 @@ import asyncio
 import threading
 import time
 
+from . import events
 from .codec import check_end_marker, extract_output
 from .tmux import capture_until
 
@@ -149,6 +150,7 @@ def watch_task_completion(task_id: str) -> None:
             task["error"] = str(e)
             task["cached_output"] = f"[error] {e}"
             finalize_task(task)
+            events.emit(f"[error] {task_id} {task['pane']}: {e}")
             return
         except Exception:
             time.sleep(interval)
@@ -160,6 +162,12 @@ def watch_task_completion(task_id: str) -> None:
             if completed:
                 task["cached_output"] = output
                 finalize_task(task)
+                elapsed = task["end_time"] - task["start_time"]
+                events.emit(
+                    f"[done] {task_id} {task['pane']} {elapsed:.1f}s "
+                    f"\"{cmd_display(task.get('command', ''))}\"  "
+                    f'next: task_output(task_id="{task_id}")'
+                )
                 return
         time.sleep(interval)
         interval = min(interval * 2, max_interval)

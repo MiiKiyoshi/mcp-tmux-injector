@@ -34,7 +34,8 @@ Module layout:
    filters.py    output filtering (tqdm/grep/dedupe/save)
    tasks.py      background task registry, pane locks
    registry.py   pane/session registration, ownership, cleanup
-   watch_cli.py  standalone watch CLI + poll fingerprints
+   events.py     the session's event stream + waiter script
+   watch.py      poll_pane / watch_mem threads + poll fingerprints
    server.py     MCP tool definitions, entry point
 """
 from .server import main

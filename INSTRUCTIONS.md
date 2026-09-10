@@ -15,12 +15,21 @@ Not a sandboxed subprocess: commands have real consequences in the user's enviro
 │       conversation. "Only one session exists" is NOT a reason to
 │       reuse it: make your own.
 │
+┌─ Once per session, before the first long command
+│   └─→ wait_events()
+│       Returns this session's event stream script. Start it once with the
+│       client's persistent background monitor (§2) and end the turn. Every
+│       event of the session arrives on it as one line: [done] task, [match]
+│       pattern, [cap]/[gone] memory, [error]. Nothing per task is registered.
+│       A reply ending "No event stream is running" means it is not started.
+│
 ┌─ Run a command (any duration)
 │   └─→ xsh / xpy / xtcl (default mode)
 │       Default timeout=3s (capped at 60s).
 │       Completes within timeout → output returned.
-│       Exceeds timeout → auto-promotes; returned message contains task_id.
-│       Known-slow work leaves timeout unset and follows task_wait.
+│       Exceeds timeout → auto-promotes; returned message contains task_id,
+│       and [done] arrives on the event stream. Known-slow work leaves
+│       timeout unset.
 │
 ├─ Enter or exit an interpreter / remote shell (prompt changes)
 │   └─→ xsh / xpy / xtcl with read_after=N
@@ -32,16 +41,10 @@ Not a sandboxed subprocess: commands have real consequences in the user's enviro
 │         xpy(pane, "exit()", read_after=1)         # exit Python REPL
 │         xsh(pane, "ssh server", read_after=2)     # enter remote shell
 │
-├─ Wait for an already-promoted task to finish
-│   └─→ task_wait(task_id)
-│       Returns a path to a wrapper script. Start it with the client-specific
-│       completion flow in §2. The script blocks, prints one outcome line,
-│       and exits. Call task_output(task_id) for the body.
-│
 ├─ Wait for specific output to appear (no task_id)
 │   └─→ poll_pane(pane, pattern, only_new=True|False)
-│       Returns a path to a wrapper script. Run via subprocess tool. The
-│       script prints "[match] <line>" when the pattern matches.
+│       Returns at once. "[match] <pane>: <line>" arrives on the event
+│       stream when the pattern first appears, and the watch ends.
 │       For output whose arrival is SLOW or UNKNOWN (builds, long tasks).
 │       A prompt appearing within a second or two of your command
 │       (password, yes/no, REPL banner) is a prompt transition, not this:
@@ -66,15 +69,14 @@ Not a sandboxed subprocess: commands have real consequences in the user's enviro
 │
 ├─ Get told when memory crosses a limit
 │   └─→ watch_mem(pane=... | session=..., rss_gb=..., gpu_gb=..., poll=30)
-│       Returns a path to a wrapper script. Start it with the client-specific
-│       completion flow in §2. Silent while under the cap; on the first breach
-│       prints a per-pane table with the Total and the host's remaining memory,
-│       then exits.
+│       Returns at once. Silent while under the cap; on the first breach a
+│       per-pane table with the Total and the host's remaining memory arrives
+│       on the event stream, and the watch ends.
 │       Exactly one of pane / session. Prefer session when a job spans panes:
 │       two panes at 6 GiB each pass a 10 GiB per-pane cap while the session
 │       sits at 12 GiB, so a per-pane cap measures the wrong thing.
 │       Give rss_gb, gpu_gb, or both: whichever kind of blowup matters.
-│       Exits with "[gone]" if the trees end, so silence never has to be
+│       Ends with "[gone]" if the trees end, so silence never has to be
 │       read as "still fine".
 │
 │         [cap] session work_4: CPU 10.9 GiB > cap 10.0 GiB
@@ -105,69 +107,84 @@ Not a sandboxed subprocess: commands have real consequences in the user's enviro
 
 ## 2. Common patterns
 
-### Long-running command completion
+### The event stream
 
-An `xsh`, `xpy`, or `xtcl` call that exceeds its inline timeout returns a
-`task_id`. Call `task_wait(task_id)` once. It returns a wrapper script path.
-Start that script with the client-specific completion flow below. After its
-wait completes or its completion notification arrives, call
-`task_output(task_id)` for the command body.
+Every wait in this server goes through one channel. `wait_events()` returns
+the path of a script that blocks silently and prints one line per event, for
+the whole session. It is started once. After that a promoted task, a
+poll_pane watch, or a watch_mem cap needs no further call: the line arrives,
+and the reply to it is `task_output(task_id)` for a [done], or whatever the
+[match] / [cap] calls for.
+
+    xsh(pane, "make -j")
+    → "[task promoted] T1 (pane, 3s)  [done] arrives on the event stream; end the turn."
+    … the stream prints:
+    [done] T1 work:build.0 412.0s "make -j"  next: task_output(task_id="T1")
+    task_output(task_id="T1")
+
+An unstarted stream is not silent: every reply that promises an event ends
+with "No event stream is running: call wait_events() and start its script."
+Events that land before the script starts are kept and print the moment it
+starts. The script prints "[gone]" and exits when the server process ends;
+the new server has a new script, so `wait_events()` is called again.
 
 #### Claude Code
 
-Pass the wrapper script path to the `command` parameter of the `Monitor`
-tool, together with a `description` (required: the call fails without it,
-unlike `timeout_ms`/`persistent` which default to 300000ms/false). `Monitor`
-returns control immediately and delivers a completion notification when the
-wrapper exits.
-
 ```text
-wait_script = task_wait(task_id="T...")
-Monitor(command=wait_script, description="<what you're waiting for>")
-# completion notification arrives
-task_output(task_id="T...")
+Monitor(command=<script>, description="tmux-injector events",
+        persistent=true, timeout_ms=3600000)
 ```
+
+`persistent=true` keeps the monitor for the session. Each printed line is one
+notification. The monitor is started once; a second `wait_events()` while it
+runs answers "[running]" and nothing is started.
 
 #### Codex
 
-Run the wrapper in `functions.exec`. `yield_control()` returns control while the
-script continues. If `exec_command` yields a session, `write_stdin` keeps
-waiting on that same session. `notify()` delivers the completion output without
-requiring a later wait call on the exec cell.
+Codex has no single persistent monitor. A `functions.exec` cell starts the
+script with `exec_command`, keeps polling its session with `write_stdin`, and
+calls `notify()` for each complete line; `yield_control()` returns the turn
+while the cell keeps polling. Empty polls stay inside the cell and cost no
+tokens. `write_stdin`'s smallest empty poll is 5 s, so a line arrives within
+about 5 s of the event. The cell lives as long as the connected runtime; after
+a Codex restart it is started again.
 
 ```javascript
-const waitScript = "/tmp/tmix_w_...sh"; // returned by task_wait
-const pending = (async () => {
-  let result = await tools.exec_command({
-    cmd: waitScript,
-    yield_time_ms: 30000,
-  });
-  while (result.session_id !== undefined) {
+const script = "<script path from wait_events()>";
+const watcher = (async () => {
+  let result = await tools.exec_command({ cmd: script, yield_time_ms: 250 });
+  let buffer = "";
+  for (;;) {
+    buffer += result.output;
+    let nl;
+    while ((nl = buffer.indexOf("\n")) !== -1) {
+      notify(buffer.slice(0, nl));
+      buffer = buffer.slice(nl + 1);
+    }
+    if (result.session_id === undefined) {
+      if (buffer.length > 0) notify(buffer);
+      return;
+    }
     result = await tools.write_stdin({
-      session_id: result.session_id,
-      chars: "",
-      yield_time_ms: 300000,
+      session_id: result.session_id, chars: "", yield_time_ms: 5000,
     });
   }
-  return result;
 })();
 
-text("task wait started");
+text("event stream started");
 yield_control();
-const result = await pending;
-notify(result.output.trim());
+await watcher;
 ```
 
 #### Other harnesses
 
-Use the current harness's background command facility when it returns control
-immediately and sends a completion interrupt. When that facility does not
-exist, run the wrapper script with the harness's `bash` tool and wait for it to
-return before calling `task_output(task_id)`.
+A background facility that streams stdout lines runs the script the same
+way. Without one, `<script> --once` blocks in the shell tool until the next
+event, prints it, and exits; it is run again for the next event.
 
 Waiting for a pattern in an already-running task:
-    cmd = poll_pane(pane=pane, pattern="Build complete|ERROR")
-    # Run cmd via your subprocess tool. Prints "[match] <line>" on hit.
+    poll_pane(pane=pane, pattern="Build complete|ERROR")
+    # "[match] <pane>: <line>" arrives on the event stream on hit.
     #
     # WARNING: only_new=True (default) snapshots the pane state at this
     # call. If the pattern already arrived (quick command finished before
@@ -177,9 +194,9 @@ Waiting for a pattern in an already-running task:
 
 After respawn/create with cmd= (process starts immediately):
     respawn_pane(pane, cmd="python3")
-    cmd = poll_pane(pane=pane, pattern=">>>", only_new=False)
-    # Run cmd via subprocess tool. only_new=False because ">>>" is already
-    # on screen: only_new=True would never match (would be in the snapshot).
+    poll_pane(pane=pane, pattern=">>>", only_new=False)
+    # only_new=False because ">>>" is already on screen: only_new=True
+    # would never match (would be in the snapshot).
 
 Entering a remote shell:
     xsh(pane, "mlx2", read_after=2)         # kubectl exec, ssh, docker exec
@@ -235,8 +252,8 @@ Different code per pane:
 
 Per-pane outcome (default mode): each pane independently either returns output
 or promotes to a task. The aggregated result lists output for finished panes
-and task_id for promoted ones: call task_wait per task_id for any that are
-still running.
+and task_id for promoted ones; each still-running one reports [done] on the
+event stream.
 
 read_after mode also works with panes=: same N-second wait per pane, all
 captured concurrently.
@@ -294,16 +311,16 @@ Any interruption: timeout, abort, user reject, cancel: means code was already se
 
 Timeout (default 3s, exceeded):
     Tool returns "[task promoted] T... (pane, Ns)".
-    The task is registered automatically. Follow §2 Long-running command
-    completion.
+    The task is registered automatically. Its [done] arrives on the event
+    stream (§2).
 
 User cancellation (CancelledError):
     Auto-converts to background task, same as timeout.
-    task_list() identifies it, then task_wait(task_id) waits once.
+    task_list() identifies it; its [done] arrives on the event stream.
 
 Long HPC / training / build commands:
     Leave timeout unset. The default timeout promotes the command before the
-    MCP client request expires. Follow §2 Long-running command completion.
+    MCP client request expires. Its [done] arrives on the event stream (§2).
 
 Exit commands change the prompt: default mode can't detect completion.
 Use read_after for exit:

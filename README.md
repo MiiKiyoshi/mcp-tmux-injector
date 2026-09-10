@@ -11,9 +11,9 @@ CLI agents can't natively talk to a live REPL or a long-running shell. This serv
 - **Three execution tools**: `xsh` (shell), `xpy` (Python REPL), `xtcl` (TCL/HPC tools).
   - Default mode waits up to 3 seconds, then turns unfinished work into a background task and returns its `task_id`. Known-slow work leaves the inline timeout unset so this response returns before the MCP client request expires.
   - `read_after=N` skips the wait-for-completion logic: sends the code, sleeps N seconds, returns the pane's screen content. Use when the prompt itself is changing (entering a REPL, ssh, exit).
-- **Get notified when something finishes**: `task_wait(task_id)` and `poll_pane(pattern)` return a small wrapper script. Run it with the client-specific completion flow in [INSTRUCTIONS.md](INSTRUCTIONS.md); when the task completes or the pattern matches, the script prints one line and exits. Then `task_output(task_id)` returns the full body.
+- **One event stream per session**: `wait_events()` returns a script that blocks silently and prints one line per event, for the whole session. It is started once with the client's persistent background monitor (Claude Code `Monitor(persistent=true)`; the Codex pattern is in [INSTRUCTIONS.md](INSTRUCTIONS.md)). A promoted task then reports `[done]` there by itself, `poll_pane(pattern)` reports `[match]`, and nothing per task is registered. `task_output(task_id)` returns the full body.
 - **Save output to a file**: `task_output(save=path)` and `capture_pane(save=path)` write filtered output to disk.
-- **Memory, per pane or per session**: `mem_pane` sums whole process trees (host RSS + GPU), so a tool that forks helpers is accounted for. `mem_pane(session=…)` gives a per-pane table with a total, `session="*"` one row per session. `watch_mem(pane=… | session=…, rss_gb=…, gpu_gb=…)` returns a wrapper script in the same style as `task_wait`: quiet under the cap, one breach report with the table.
+- **Memory, per pane or per session**: `mem_pane` sums whole process trees (host RSS + GPU), so a tool that forks helpers is accounted for. `mem_pane(session=…)` gives a per-pane table with a total, `session="*"` one row per session. `watch_mem(pane=… | session=…, rss_gb=…, gpu_gb=…)` is quiet under the cap and puts one breach report with the table on the event stream.
 - **Per-pane locking**: only one injected command runs on a pane at a time.
 - **Multi-pane dispatch**: `panes=[…]` with either `code=` (same code to all) or `codes=[…]` (different code per pane).
 - **Works over ssh**: a pane that is ssh'd into another machine, or running a REPL there, behaves the same as a local one. Code is delivered as keystrokes, so nothing needs to exist on the remote filesystem: `file=` included.
@@ -60,7 +60,7 @@ create_session("work", windows=["train", "eval"])  # or a new managed session
 "Run train.py and let me know when it's done"
 ```
 
-The agent runs `xsh(pane, "python3", read_after=2)` then `xpy(pane, file="train.py")`. Long scripts return a `task_id`; the agent follows the client-specific completion flow in [INSTRUCTIONS.md](INSTRUCTIONS.md), gets a one-line completion notice, and calls `task_output(task_id)` for the body.
+The agent runs `xsh(pane, "python3", read_after=2)` then `xpy(pane, file="train.py")`. Long scripts return a `task_id`; the `[done]` line lands on the session's event stream, and the agent calls `task_output(task_id)` for the body.
 
 **Parallel work across windows**
 
@@ -92,7 +92,7 @@ Total    21.2 GiB  -         Total          10.9 GiB  -
 "Tell me if the training session goes over 40 GB"
 ```
 
-`watch_mem(session="work", rss_gb=40)` returns a wrapper script; run it with the client-specific completion flow in [INSTRUCTIONS.md](INSTRUCTIONS.md). It stays quiet under the cap and delivers the table above on the first breach, plus what the host has left. Watch the session rather than a pane when a job spans several — two panes at 6 GiB each pass a 10 GiB per-pane cap while the session sits at 12 GiB.
+`watch_mem(session="work", rss_gb=40)` stays quiet under the cap and puts the table above on the event stream on the first breach, plus what the host has left. Watch the session rather than a pane when a job spans several — two panes at 6 GiB each pass a 10 GiB per-pane cap while the session sits at 12 GiB.
 
 ## Configuration
 
@@ -132,7 +132,8 @@ mcp_tmux_injector/
   tasks.py      background task registry, pane locks
   registry.py   pane/session registration, ownership, cleanup
   mem.py        per-pane process-tree memory (host RSS + GPU), host totals
-  watch_cli.py  standalone watch CLI + poll fingerprints
+  events.py     the session's event stream + waiter script
+  watch.py      poll_pane / watch_mem threads + poll fingerprints
   server.py     MCP tool definitions, entry point
 tests/
   test_pure.py  pure-function tests (no tmux needed): .venv/bin/python tests/test_pure.py

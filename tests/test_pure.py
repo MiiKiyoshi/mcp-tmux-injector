@@ -18,7 +18,7 @@ from mcp_tmux_injector.filters import (
 )
 from mcp_tmux_injector.tasks import cmd_display
 from mcp_tmux_injector import tmux
-from mcp_tmux_injector.watch_cli import find_fingerprint, get_fresh_lines
+from mcp_tmux_injector.watch import find_fingerprint, get_fresh_lines
 
 FAILURES = []
 
