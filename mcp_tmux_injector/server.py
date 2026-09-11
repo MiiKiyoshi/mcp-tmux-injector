@@ -26,6 +26,30 @@ from .registry import EXTERNAL, MANAGED, check_pane_registered, require_pane
 from .tmux import check_session, run_tmux_cmd
 from . import mem as memmod
 
+def _wait_method(ctx: Context) -> str:
+    name = ctx.session.client_params.clientInfo.name.casefold()
+    if "claude" in name:
+        return (
+            "Run the script with Monitor(command=<script>, persistent=true, "
+            "timeout_ms=3600000), then end the turn. Keep the monitor for subsequent events."
+        )
+    if "codex" in name:
+        return (
+            "Run the script path, quoted for the shell, with exec_command. Retain its "
+            "session_id and read output with write_stdin using empty chars. Keep the turn "
+            "active while waiting; if a read returns no output, wait again on the same "
+            "session. Do not send a final answer expecting background output to start a "
+            "new turn. After handling an event, resume waiting on the same process."
+        )
+    return (
+        "Run the script with your shell tool and read its output. If the tool returns a "
+        "running session, retain it and use the tool that reads subsequent output. Keep "
+        "the turn active while waiting unless your client explicitly supports resuming "
+        "a completed turn from background output. After handling an event, resume "
+        "waiting on the same process."
+    )
+
+
 mcp = FastMCP("tmux-injector", instructions=INSTRUCTIONS)
 
 
@@ -238,7 +262,8 @@ async def _blocking_on_pane(p: str, code: str, send_fn, timeout: float, filter_k
         threading.Thread(target=tasks.watch_task_completion, args=(task_id,), daemon=True).start()
         return (
             f"[task promoted] {task_id} ({p}, {timeout}s)\n"
-            f"[done] arrives on the event stream; end the turn."
+            f"The command is already running; do not resend it. "
+            f"Receive [done] using the client-specific waiting instructions from wait_events()."
             + events.waiter_note()
         )
     except asyncio.CancelledError:
@@ -770,8 +795,12 @@ def poll_pane(
 
 
 @mcp.tool()
-def wait_events() -> str:
-    """Return this session's event stream script. Start it once with the client's persistent background monitor (Claude Code: Monitor with persistent=true) and end the turn. It prints one line per event ([done] task, [match] pattern, [cap]/[gone] memory, [error]) and keeps waiting, so it is never started again; nothing per task is registered. Costs nothing while waiting."""
+def wait_events(ctx: Context) -> str:
+    """Return this session's event script and client-specific waiting instructions.
+
+    Follow the returned waiting instructions, selected for the connected client.
+    Reuse the process after handling each event; nothing is registered per task.
+    """
     path = events.write_script()
     if events.waiter_alive():
         return f"[running] the event stream is already being watched; do not start it again.\nscript: {path}"
@@ -779,9 +808,11 @@ def wait_events() -> str:
     note = f" {pending} event(s) are already waiting and print at once." if pending else ""
     return (
         f"script: {path}\n"
-        f"Start it once and end the turn.{note}\n"
-        f"Claude Code: Monitor(command=\"{path}\", description=\"tmux-injector events\", persistent=true, timeout_ms=3600000)\n"
-        f"A client whose shell tool can only block runs `{path} --once`: it returns at the next event."
+        f"{_wait_method(ctx)}{note}\n"
+        "On [done], read task_output(task_id); handle other events as reported. "
+        "Do not resend the task command. Resume waiting on the same process after handling "
+        "events. Start another copy only after the previous process has ended. If the stream "
+        "reports that the server exited, call wait_events() on the new server for its script.\n"
     )
 
 

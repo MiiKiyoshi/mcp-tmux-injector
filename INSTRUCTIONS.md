@@ -18,7 +18,7 @@ Not a sandboxed subprocess: commands have real consequences in the user's enviro
 ┌─ Once per session, before the first long command
 │   └─→ wait_events()
 │       Returns this session's event stream script. Start it once with the
-│       client's persistent background monitor (§2) and end the turn. Every
+│       client-specific waiting method (§2). Every
 │       event of the session arrives on it as one line: [done] task, [match]
 │       pattern, [cap]/[gone] memory, [error]. Nothing per task is registered.
 │       A reply ending "No event stream is running" means it is not started.
@@ -112,12 +112,14 @@ Not a sandboxed subprocess: commands have real consequences in the user's enviro
 Every wait in this server goes through one channel. `wait_events()` returns
 the path of a script that blocks silently and prints one line per event, for
 the whole session. It is started once. After that a promoted task, a
-poll_pane watch, or a watch_mem cap needs no further call: the line arrives,
+poll_pane watch, or a watch_mem cap needs no further event registration: receive
+its output using the client-specific waiting method below,
 and the reply to it is `task_output(task_id)` for a [done], or whatever the
 [match] / [cap] calls for.
 
     xsh(pane, "make -j")
-    → "[task promoted] T1 (pane, 3s)  [done] arrives on the event stream; end the turn."
+    → "[task promoted] T1 (pane, 3s)  The command is already running; do not resend it."
+    Receive [done] using the client-specific waiting method below.
     … the stream prints:
     [done] T1 work:build.0 412.0s "make -j"  next: task_output(task_id="T1")
     task_output(task_id="T1")
@@ -128,59 +130,10 @@ Events that land before the script starts are kept and print the moment it
 starts. The script prints "[gone]" and exits when the server process ends;
 the new server has a new script, so `wait_events()` is called again.
 
-#### Claude Code
-
-```text
-Monitor(command=<script>, description="tmux-injector events",
-        persistent=true, timeout_ms=3600000)
-```
-
-`persistent=true` keeps the monitor for the session. Each printed line is one
-notification. The monitor is started once; a second `wait_events()` while it
-runs answers "[running]" and nothing is started.
-
-#### Codex
-
-Codex has no single persistent monitor. A `functions.exec` cell starts the
-script with `exec_command`, keeps polling its session with `write_stdin`, and
-calls `notify()` for each complete line; `yield_control()` returns the turn
-while the cell keeps polling. Empty polls stay inside the cell and cost no
-tokens. `write_stdin`'s smallest empty poll is 5 s, so a line arrives within
-about 5 s of the event. The cell lives as long as the connected runtime; after
-a Codex restart it is started again.
-
-```javascript
-const script = "<script path from wait_events()>";
-const watcher = (async () => {
-  let result = await tools.exec_command({ cmd: script, yield_time_ms: 250 });
-  let buffer = "";
-  for (;;) {
-    buffer += result.output;
-    let nl;
-    while ((nl = buffer.indexOf("\n")) !== -1) {
-      notify(buffer.slice(0, nl));
-      buffer = buffer.slice(nl + 1);
-    }
-    if (result.session_id === undefined) {
-      if (buffer.length > 0) notify(buffer);
-      return;
-    }
-    result = await tools.write_stdin({
-      session_id: result.session_id, chars: "", yield_time_ms: 5000,
-    });
-  }
-})();
-
-text("event stream started");
-yield_control();
-await watcher;
-```
-
-#### Other harnesses
-
-A background facility that streams stdout lines runs the script the same
-way. Without one, `<script> --once` blocks in the shell tool until the next
-event, prints it, and exits; it is run again for the next event.
+Follow the waiting instructions returned by `wait_events()`; they are selected
+for the connected client. Reuse the same event stream after handling events.
+On `[done]`, read `task_output(task_id)`; handle other events as reported.
+The task command has already been sent; do not resend it.
 
 Waiting for a pattern in an already-running task:
     poll_pane(pane=pane, pattern="Build complete|ERROR")

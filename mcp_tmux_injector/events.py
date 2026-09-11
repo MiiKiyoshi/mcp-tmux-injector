@@ -89,8 +89,8 @@ def write_script() -> str:
     script = f"""#!/bin/sh
 # tmux-injector event stream for server pid {PID}.
 # Prints each event as it lands ([done] task, [match] pattern, [cap] memory, [error])
-# and keeps waiting for the next. Runs for the whole session: start it once with the
-# client's persistent background monitor. `--once` prints the next batch and exits,
+# and keeps waiting for the next. Start it once using the client-specific instructions
+# returned by wait_events(). `--once` prints the next batch and exits,
 # for a client whose shell tool can only block.
 f={shlex.quote(str(EVENT_FILE))}
 a={shlex.quote(str(ACK_FILE))}
