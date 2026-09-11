@@ -35,11 +35,12 @@ def _wait_method(ctx: Context) -> str:
         )
     if "codex" in name:
         return (
-            "Run the script path, quoted for the shell, with exec_command. Retain its "
-            "session_id and read output with write_stdin using empty chars. Keep the turn "
-            "active while waiting; if a read returns no output, wait again on the same "
-            "session. Do not send a final answer expecting background output to start a "
-            "new turn. After handling an event, resume waiting on the same process."
+            'Run sh <quoted-script-path> --codex "$CODEX_THREAD_ID" with exec_command '
+            "and a short yield_time_ms. Once running, end the turn; do not poll. "
+            "The script uses codex queue to deliver events as labeled user messages, "
+            "including while idle. Delivery may take about 10 seconds. "
+            "Requires codex queue on PATH and CODEX_THREAD_ID in the agent shell. "
+            "Keep one waiter; stop its process when no longer needed."
         )
     return (
         "Run the script with your shell tool and read its output. If the tool returns a "

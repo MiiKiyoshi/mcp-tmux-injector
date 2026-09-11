@@ -92,6 +92,22 @@ def write_script() -> str:
 # and keeps waiting for the next. Start it once using the client-specific instructions
 # returned by wait_events(). `--once` prints the next batch and exits,
 # for a client whose shell tool can only block.
+thread=
+if [ "${{1-}}" = "--codex" ]; then
+  thread=${{2:?Pass the Codex thread ID}}
+  command -v codex >/dev/null || exit 1
+fi
+deliver() {{
+  if [ -n "$thread" ]; then
+    until codex queue --thread "$thread" --message "[tmux-injector event]
+$1"; do
+      printf '%s\\n' 'Queue delivery failed; retrying in 5 seconds' >&2
+      sleep 5
+    done
+  else
+    printf '%s\\n' "$1"
+  fi
+}}
 f={shlex.quote(str(EVENT_FILE))}
 a={shlex.quote(str(ACK_FILE))}
 once=0; [ "$1" = "--once" ] && once=1
@@ -101,13 +117,13 @@ while :; do
   n=$(( $(cat "$a" 2>/dev/null || echo 0) ))
   total=$(( $(wc -l 2>/dev/null < "$f" || echo 0) ))
   if [ "$total" -gt "$n" ]; then
-    sed -n "$((n + 1)),${{total}}p" "$f"
+    deliver "$(sed -n "$((n + 1)),${{total}}p" "$f")"
     echo "$total" > "$a"
     [ $once -eq 1 ] && exit 0
     continue
   fi
   if ! kill -0 {PID} 2>/dev/null; then
-    echo "[gone] tmux-injector server (pid {PID}) exited; its tasks are gone. Call wait_events() again for the new server."
+    deliver "[gone] tmux-injector server (pid {PID}) exited; its tasks are gone. Call wait_events() again for the new server."
     exit 0
   fi
   timeout 60 {tmux} wait-for {CHANNEL} >/dev/null 2>&1
