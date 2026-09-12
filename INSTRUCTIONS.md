@@ -109,11 +109,12 @@ Not a sandboxed subprocess: commands have real consequences in the user's enviro
 
 ### The event stream
 
-Every wait in this server goes through one channel. `wait_events()` returns
-the path of a script that blocks silently and prints one line per event, for
-the whole session. It is started once. After that a promoted task, a
-poll_pane watch, or a watch_mem cap needs no further event registration: receive
-its output using the client-specific waiting method below,
+Every wait in this server goes through one channel. At the start of every new
+MCP connection, including after a client or server restart, call `wait_events()`
+once and start its returned script exactly once as instructed. Do not poll,
+start a duplicate, or assume an earlier waiter survived. After that a promoted
+task, a poll_pane watch, or a watch_mem cap needs no further event registration:
+receive its output using the client-specific waiting method below,
 and the reply to it is `task_output(task_id)` for a [done], or whatever the
 [match] / [cap] calls for.
 
@@ -127,8 +128,8 @@ and the reply to it is `task_output(task_id)` for a [done], or whatever the
 An unstarted stream is not silent: every reply that promises an event ends
 with "No event stream is running: call wait_events() and start its script."
 Events that land before the script starts are kept and print the moment it
-starts. The script prints "[gone]" and exits when the server process ends;
-the new server has a new script, so `wait_events()` is called again.
+starts. Unread events from a dead server are carried into the new server's
+queue. The old script prints "[gone]" and exits when its server process ends.
 
 Follow the waiting instructions returned by `wait_events()`; they are selected
 for the connected client. Reuse the same event stream after handling events.

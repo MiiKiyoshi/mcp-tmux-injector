@@ -9,9 +9,11 @@ background monitor; nothing per event is ever registered.
 
 The file holds the events and the ack file holds the watermark, so the script
 carries no state: a line appended before the waiter starts is printed the
-moment it starts, and a line appended while the waiter is between checks is
+moment it starts, and unread lines from a dead server are carried into the
+next server's file. A line appended while the waiter is between checks is
 covered by tmux remembering a signal sent with no waiter parked.
 """
+import fcntl
 import os
 import shlex
 import threading
@@ -40,15 +42,33 @@ def _alive(pid: int) -> bool:
 
 
 def init() -> None:
-    """Start this server's stream empty and drop files left by dead servers."""
+    """Start this server's stream with unread events left by dead servers."""
     EVENT_DIR.mkdir(parents=True, exist_ok=True)
-    for f in EVENT_DIR.iterdir():
-        stem = f.name.split(".", 1)[0]
-        if stem.isdigit() and int(stem) != PID and not _alive(int(stem)):
-            f.unlink(missing_ok=True)
-    EVENT_FILE.write_text("")
-    ACK_FILE.write_text("0\n")
-    WAITER_FILE.unlink(missing_ok=True)
+    with (EVENT_DIR / ".init.lock").open("a+") as init_lock:
+        fcntl.flock(init_lock, fcntl.LOCK_EX)
+        dead = {
+            int(stem)
+            for f in EVENT_DIR.iterdir()
+            if (stem := f.name.split(".", 1)[0]).isdigit()
+            and int(stem) != PID
+            and not _alive(int(stem))
+        }
+        carried: list[str] = []
+        for pid in sorted(dead):
+            try:
+                lines = (EVENT_DIR / f"{pid}.log").read_text(encoding="utf-8").splitlines(keepends=True)
+            except OSError:
+                lines = []
+            try:
+                acked = int((EVENT_DIR / f"{pid}.ack").read_text().strip() or 0)
+            except (OSError, ValueError):
+                acked = 0
+            carried.extend(lines[max(acked, 0):])
+            for old in EVENT_DIR.glob(f"{pid}.*"):
+                old.unlink(missing_ok=True)
+        EVENT_FILE.write_text("".join(carried), encoding="utf-8")
+        ACK_FILE.write_text("0\n")
+        WAITER_FILE.unlink(missing_ok=True)
 
 
 def emit(text: str) -> None:

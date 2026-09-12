@@ -8,6 +8,33 @@ from types import SimpleNamespace
 from mcp_tmux_injector import events, server
 
 
+def test_restart_carries_only_unread_events_from_dead_servers(tmp_path, monkeypatch):
+    monkeypatch.setattr(events, "EVENT_DIR", tmp_path)
+    monkeypatch.setattr(events, "PID", 300)
+    monkeypatch.setattr(events, "EVENT_FILE", tmp_path / "300.log")
+    monkeypatch.setattr(events, "ACK_FILE", tmp_path / "300.ack")
+    monkeypatch.setattr(events, "WAITER_FILE", tmp_path / "300.waiter")
+    monkeypatch.setattr(events, "SCRIPT_FILE", tmp_path / "300.sh")
+    monkeypatch.setattr(events, "_alive", lambda pid: pid == 200)
+    (tmp_path / "100.log").write_text("read\nunread\n")
+    (tmp_path / "100.ack").write_text("1\n")
+    (tmp_path / "100.waiter").write_text("999\n")
+    (tmp_path / "101.log").write_text("no watermark\n")
+    (tmp_path / "200.log").write_text("live\n")
+    (tmp_path / "200.ack").write_text("0\n")
+
+    events.init()
+
+    assert events.EVENT_FILE.read_text() == "unread\nno watermark\n"
+    assert events.ACK_FILE.read_text() == "0\n"
+    assert not (tmp_path / "100.log").exists()
+    assert (tmp_path / "200.log").read_text() == "live\n"
+    delivered = subprocess.run(["sh", events.write_script(), "--once"], capture_output=True,
+                               text=True, check=True)
+    assert delivered.stdout == "unread\nno watermark\n"
+    assert events.ACK_FILE.read_text() == "2\n"
+
+
 def test_wait_events_selects_client_instructions(monkeypatch):
     monkeypatch.setattr(server.events, "write_script", lambda: "/example/events.sh")
     monkeypatch.setattr(server.events, "waiter_alive", lambda: False)
@@ -21,9 +48,12 @@ def test_wait_events_selects_client_instructions(monkeypatch):
         text = result[0][0].text
         assert ("Monitor" in text) == (name == "claude-code")
         assert ("codex queue" in text) == (name == "codex-mcp-client")
+        assert ('sandbox_permissions="require_escalated"' in text) == (name == "codex-mcp-client")
         assert "task_output(task_id)" in text
     tool = next(t for t in asyncio.run(server.mcp.list_tools()) if t.name == "wait_events")
     assert "ctx" not in tool.inputSchema["properties"]
+    for needed in ("every new", "exactly once", "Do not poll", "Unread events"):
+        assert needed in server.mcp.instructions, needed
 
 
 def test_queue_before_ack(tmp_path, monkeypatch):
