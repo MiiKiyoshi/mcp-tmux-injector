@@ -19,6 +19,16 @@ def test_schemas_carry_no_titles_or_null_defaults():
     assert '"default": null' not in schemas
 
 
+def test_check_lists_the_tools_without_starting(monkeypatch, capsys):
+    def refuse():
+        raise AssertionError("--check must not start the event queue")
+    monkeypatch.setattr(server.events, "init", refuse)
+    monkeypatch.setattr(server.sys, "argv", ["mcp-tmux-injector", "--check"])
+    server.main()
+    names = capsys.readouterr().out.split()
+    assert len(names) == 20 and {"xsh", "wait_events", "capture_pane"} <= set(names)
+
+
 def test_unknown_arguments_are_rejected():
     with pytest.raises(ToolError) as error:
         asyncio.run(server.mcp.call_tool("capture_pane", {"pane": "s:w.0", "v": "x", "lines": 9}))

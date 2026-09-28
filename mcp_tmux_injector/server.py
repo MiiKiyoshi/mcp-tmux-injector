@@ -3,6 +3,7 @@ import asyncio
 import functools
 import os
 import subprocess
+import sys
 import threading
 import time
 from urllib.parse import urlparse
@@ -941,6 +942,10 @@ def capture_pane(
 
 
 def main():
+    if sys.argv[1:] == ["--check"]:
+        # An install check: list the tools, touching neither tmux nor the event queue.
+        print(" ".join(tool.name for tool in asyncio.run(mcp.list_tools())))
+        return
     # Strip .venv from PATH so tmux panes don't inherit virtualenv pollution
     os.environ["PATH"] = ":".join(
         p for p in os.environ.get("PATH", "").split(":") if "/.venv/" not in p
