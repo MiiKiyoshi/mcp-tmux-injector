@@ -47,6 +47,9 @@ def test_wait_events_selects_client_instructions(monkeypatch):
         result = asyncio.run(server.mcp.call_tool("wait_events", {}))
         text = result[0][0].text
         assert ("Monitor" in text) == (name == "claude-code")
+        # Claude Code's Monitor takes command, description and timeout_ms (at most 30 minutes).
+        assert "persistent" not in text
+        assert ('description="' in text and "timeout_ms=1800000" in text) == (name == "claude-code")
         assert ("codex queue" in text) == (name == "codex-mcp-client")
         assert ('sandbox_permissions="require_escalated"' in text) == (name == "codex-mcp-client")
         assert "task_output(task_id)" in text
