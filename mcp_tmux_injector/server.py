@@ -174,8 +174,9 @@ _LARGE_OUTPUT_PREVIEW = 20
 
 
 def _output_lines(output: str) -> list[str]:
-    """Lines of a task's output. The shell sender ends output with a newline, which
-    would otherwise read as one more, empty line."""
+    """Lines of a task's output. The shell and Python senders print a newline
+    before the end marker, so a finished last line would otherwise read as one
+    more, empty line."""
     lines = output.split('\n') if output else []
     if lines and lines[-1] == "":
         lines.pop()
@@ -319,6 +320,8 @@ async def xpy(
 ) -> str:
     """Run Python in a pane's REPL. A bare expression prints nothing: use print()."""
     send_py = send_python_code
+    if file and code:
+        raise ValueError("Use 'code' or 'file', not both")
     if file:
         client_cwd = await _get_client_cwd(ctx) if ctx else _client_cwd
         abs_path = _resolve_file_path(file, client_cwd)
@@ -347,7 +350,7 @@ async def xtcl(
     tail: int = Field(0, description=_TAIL),
     force: bool = Field(False, description=_FORCE),
 ) -> str:
-    """Run TCL in a pane (TCL tool and other TCL tools). Keep code on one line."""
+    """Run TCL in a pane (TCL tool and other TCL tools)."""
     return await _exec_tool("tcl", send_tcl_code, pane, code, timeout, read_after, tail, force)
 
 
@@ -384,6 +387,8 @@ def task_output(
     C: int = Field(0, description=_CONTEXT),
 ) -> str:
     """Output of a task so far, without waiting."""
+    if head and tail:
+        raise ValueError("Use 'head' or 'tail', not both")
     task = _get_task(task_id)
     if "cached_output" in task:
         output = task["cached_output"]
@@ -736,6 +741,8 @@ def create_session(name: str, windows: list[str] = None, start_dir: str = None,
 
     if windows is None:
         windows = ["main"]
+    if not windows or len(set(windows)) != len(windows):
+        raise ValueError("windows needs distinct names, or leave it unset for one window 'main'")
 
     args = ["new-session", "-d", "-s", name, "-n", windows[0]]
     if start_dir:
@@ -827,11 +834,13 @@ def kill_window(session: str, window: str, force: bool = Field(False, descriptio
 
     window_name = tmux.resolve_window(session, window)
 
-    owner = registry._sessions.get(session, {}).get("windows", {}).get(window_name, {}).get("owner", EXTERNAL)
-    registry.check_ownership("Window", f"{session}:{window_name}", owner, force)
+    registry.check_ownership("Window", f"{session}:{window_name}",
+                             registry.window_owner(session, window_name), force)
 
     registry.cleanup_window_resources(session, window_name)
     subprocess.run(tmux.build_tmux_command(["kill-window", "-t", f"={session}:{window_name}"]), capture_output=True)
+    # Killing the last window ends the session, which the existence cache may still hold.
+    tmux.forget_session(session)
 
     return f"Killed window '{window_name}' in session '{session}'"
 
@@ -848,7 +857,9 @@ def set_pane(pane: str, description: str) -> str:
     if not check_session(pane):
         raise ValueError(f"Pane '{pane}' not found in tmux")
 
-    registry._working_panes[pane] = {"description": description, "owner": EXTERNAL}
+    session, window, _ = tmux.parse_pane_id(pane)
+    owner = registry.window_owner(session, tmux.resolve_window(session, window))
+    registry._working_panes[pane] = {"description": description, "owner": owner}
     registry.auto_register_session_window(pane)
     return f"Registered: {pane} ({description})"
 
@@ -861,7 +872,8 @@ def respawn_pane(pane: str, start_dir: str = None,
     """Kill the pane's process and start a fresh shell. Clears its tasks and keeps its
     registration."""
     check_pane_registered(pane)
-    registry.check_ownership("Pane", pane, registry._working_panes[pane]["owner"], force)
+    session, window, _ = tmux.parse_pane_id(pane)
+    registry.check_ownership("Pane", pane, registry.window_owner(session, tmux.resolve_window(session, window)), force)
     try:
         run_tmux_cmd(["list-panes", "-t", pane], raise_on_error=True)
     except RuntimeError as e:

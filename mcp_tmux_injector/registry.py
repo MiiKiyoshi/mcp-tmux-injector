@@ -88,6 +88,13 @@ def session_info_str(session_name: str) -> str:
     return '\n'.join(lines)
 
 
+def window_owner(session: str, window: str) -> str:
+    """MANAGED for a window this server created, EXTERNAL otherwise. `window` is
+    a window name, as tmux.resolve_window returns it. A pane is owned with its
+    window, whatever id it is registered under."""
+    return _sessions.get(session, {}).get("windows", {}).get(window, {}).get("owner", EXTERNAL)
+
+
 def check_ownership(resource_type: str, name: str, owner: str, force: bool) -> None:
     """Raise error if resource is external and force is False."""
     if owner == EXTERNAL and not force:

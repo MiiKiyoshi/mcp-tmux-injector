@@ -75,12 +75,14 @@ def test_long_output_is_kept_as_a_task(stream):
     assert call("task_output", task_id=task_id, head=3) == "1\n2\n3"
     assert call("task_output", task_id=task_id, grep="^1[0-9]$") == "\n".join(map(str, range(10, 20)))
     assert call("task_output", task_id=task_id, grep="^150$", C=1) == "149\n150\n151"
+    assert "not both" in refused("task_output", task_id=task_id, head=1, tail=1)
 
 
 def test_python_repl(stream):
     call("xsh", pane=B, code="python3", read_after=2)
     assert call("xpy", pane=B, code="print(6*7)") == "42"
     assert call("xpy", pane=B, code="print('a')\nprint('b')") == "a\nb"
+    assert "not both" in refused("xpy", pane=B, code="1", file=__file__)
     call("xpy", pane=B, code="exit()", read_after=1)
 
 
@@ -88,6 +90,7 @@ def test_python_repl(stream):
 def test_tcl(stream):
     call("xsh", pane=B, code="tclsh", read_after=1)
     assert call("xtcl", pane=B, code="puts [expr 6*7]") == "42"
+    assert call("xtcl", pane=B, code="proc f {} {\n  return 7\n}\nputs [f]") == "7"
     call("xtcl", pane=B, code="exit", read_after=1)
 
 
@@ -119,6 +122,24 @@ def test_own_session_structure(stream):
     assert call("set_pane", pane=A, description="probe").startswith("Registered")
     assert '[R: "probe"]' in call("ls", session="work")
     assert "Killed session" in call("kill_session", name="work")
+
+
+def test_session_names_and_the_last_window(stream):
+    assert "distinct names" in refused("create_session", name="empty", windows=[])
+    assert "distinct names" in refused("create_session", name="twice", windows=["x", "x"])
+    call("create_session", name="solo")
+    call("kill_window", session="solo", window="main")
+    assert "solo:main.0" in call("create_session", name="solo")
+
+
+def test_describing_an_own_pane_keeps_it_own(stream):
+    call("set_pane", pane=A, description="renamed")
+    assert "Respawned" in call("respawn_pane", pane=A)
+    index = tmux.run_tmux_cmd(["display-message", "-p", "-t", A, "#{window_index}"]).strip()
+    call("set_pane", pane=f"work:{index}.0", description="same pane by index")
+    assert "Respawned" in call("respawn_pane", pane=f"work:{index}.0")
+    assert "work:c.0" in call("create_window", session="work", name="c")
+    assert "Killed window" in call("kill_window", session="work", window="c")
 
 
 def test_user_session_structure_needs_the_user(stream):
