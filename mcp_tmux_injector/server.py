@@ -2,13 +2,13 @@
 import asyncio
 import functools
 import os
-import re
 import subprocess
 import threading
 import time
 from urllib.parse import urlparse
 
 from mcp.server.fastmcp import FastMCP, Context
+from mcp.server.fastmcp.exceptions import ToolError
 from pydantic import Field
 
 from . import events, registry, tasks, tmux, watch
@@ -54,16 +54,30 @@ def _wait_method(ctx: Context) -> str:
 
 
 class _Server(FastMCP):
-    """FastMCP without pydantic's generated schema titles: they repeat each
-    parameter name and cost every client that loads the tool."""
+    """FastMCP with compact tool schemas that rejects arguments a tool does not
+    take. Every client that loads a tool pays for its schema, and FastMCP would
+    otherwise drop an unknown argument silently."""
 
     async def list_tools(self):
         tools = await super().list_tools()
         for tool in tools:
+            tool.description = " ".join(tool.description.split())
             tool.inputSchema.pop("title", None)
             for prop in tool.inputSchema["properties"].values():
                 prop.pop("title", None)
+                if "default" in prop and prop["default"] is None:
+                    del prop["default"]
         return tools
+
+    async def call_tool(self, name, arguments):
+        tool = next((t for t in await self.list_tools() if t.name == name), None)
+        if tool is not None:
+            accepted = list(tool.inputSchema["properties"])
+            unknown = sorted(set(arguments) - set(accepted))
+            if unknown:
+                raise ToolError(f"{name} does not take {', '.join(unknown)}. "
+                                f"It takes: {', '.join(accepted) or 'no arguments'}.")
+        return await super().call_tool(name, arguments)
 
 
 mcp = _Server("tmux-injector", instructions=INSTRUCTIONS)
@@ -145,52 +159,6 @@ def _check_not_python(pane: str) -> None:
         pass
 
 
-# =============================================================================
-# Parameter resolution helpers
-# =============================================================================
-
-def _resolve_panes(pane: str | None, panes: list[str] | None) -> list[str] | None:
-    """Resolve pane/panes params. Returns None for single mode, list for multi mode."""
-    if pane is not None and panes is not None:
-        raise ValueError("Use 'pane' or 'panes', not both")
-    if panes is not None:
-        if not panes:
-            raise ValueError("'panes' list is empty")
-        for p in panes:
-            check_pane_registered(p)
-        return panes
-    return None
-
-
-def _validate_multi(single, multi, targets_name: str, targets: list) -> None:
-    """Validate single/multi mutual exclusivity and length match."""
-    if single and multi:
-        raise ValueError(f"Use '{targets_name[:-1]}' or '{targets_name}', not both")
-    if multi is not None:
-        if not targets:
-            raise ValueError(f"'{targets_name}' requires 'panes' or 'windows'")
-        if len(multi) != len(targets):
-            raise ValueError(f"len('{targets_name}')={len(multi)} != len(targets)={len(targets)}")
-
-
-def _format_multi_result(results: dict[str, str]) -> str:
-    """Format multi-pane results, grouping panes with identical output."""
-    groups: dict[str, list[str]] = {}
-    order: list[str] = []
-    for pane, output in results.items():
-        if output not in groups:
-            groups[output] = []
-            order.append(output)
-        groups[output].append(pane)
-
-    parts = []
-    for output in order:
-        header = "[" + ", ".join(groups[output]) + "]"
-        parts.append(f"{header}\n{output}")
-
-    return "\n\n".join(parts)
-
-
 def _get_task(task_id: str) -> dict:
     if task_id not in tasks._tasks:
         raise ValueError(f"Task '{task_id}' not found")
@@ -205,6 +173,15 @@ _LARGE_OUTPUT_THRESHOLD = 200
 _LARGE_OUTPUT_PREVIEW = 20
 
 
+def _output_lines(output: str) -> list[str]:
+    """Lines of a task's output. The shell sender ends output with a newline, which
+    would otherwise read as one more, empty line."""
+    lines = output.split('\n') if output else []
+    if lines and lines[-1] == "":
+        lines.pop()
+    return lines
+
+
 async def _blocking_on_pane(p: str, code: str, send_fn, timeout: float, task_type: str = "shell", tail: int = 0, force: bool = False) -> str:
     """Execute blocking command on a single pane and return filtered output."""
     lock = tasks.acquire_pane_lock(p)
@@ -214,7 +191,7 @@ async def _blocking_on_pane(p: str, code: str, send_fn, timeout: float, task_typ
     try:
         send_fn(p, code, begin, end)
         output = await tasks.capture_output_blocking(p, begin, end, timeout)
-        lines = output.split('\n') if output else []
+        lines = _output_lines(output)
         if tail > 0 and len(lines) > tail:
             lines = lines[-tail:]
         filtered = apply_output_filters(lines)
@@ -248,10 +225,8 @@ async def _blocking_on_pane(p: str, code: str, send_fn, timeout: float, task_typ
         converted = True
         threading.Thread(target=tasks.watch_task_completion, args=(task_id,), daemon=True).start()
         return (
-            f"[task promoted] {task_id} ({p}, {timeout}s)\n"
-            f"The command is already running; do not resend it. "
-            f"Receive [done] using the client-specific waiting instructions from wait_events()."
-            + events.waiter_note()
+            f"[task promoted] {task_id} ({p}, {timeout}s): running, do not resend it. "
+            f"[done] arrives on the event stream." + events.waiter_note()
         )
     except asyncio.CancelledError:
         tasks._tasks[task_id] = {
@@ -272,10 +247,6 @@ async def _read_after_on_pane(p: str, code: str, lang: str, read_after: float, t
     prompt-changing commands (entering REPL, ssh, exit) where marker pairs
     don't survive prompt changes.
     """
-    if not check_session(p):
-        return f"{p}: not found (skipped)"
-    if lang == "shell":
-        _check_not_python(p)
     lock = tasks.acquire_pane_lock(p)
     try:
         begin, _ = generate_marker()
@@ -301,26 +272,9 @@ async def _read_after_on_pane(p: str, code: str, lang: str, read_after: float, t
         lock.release()
 
 
-async def _gather_panes(target_panes: list[str], code: str, codes: list[str] | None, make_coro) -> str:
-    """Run make_coro(pane, code) concurrently over panes; skip missing panes."""
-    results = {}
-    coros = {}
-    for i, p in enumerate(target_panes):
-        if not check_session(p):
-            results[p] = "not found (skipped)"
-        else:
-            c = codes[i] if codes else code
-            coros[p] = make_coro(p, c)
-    if coros:
-        results_list = await asyncio.gather(*coros.values(), return_exceptions=True)
-        for p, result in zip(coros.keys(), results_list):
-            results[p] = str(result) if isinstance(result, BaseException) else result
-    return _format_multi_result(results)
-
-
-async def _exec_tool(lang: str, send_fn, pane, code, codes, timeout, read_after,
-                     tail, force, panes, guard_not_python: bool = False) -> str:
-    """Shared body of xpy/xtcl/xsh: mode dispatch and single/multi routing."""
+async def _exec_tool(lang: str, send_fn, pane, code, timeout, read_after,
+                     tail, force, guard_not_python: bool = False) -> str:
+    """Shared body of xpy/xtcl/xsh: mode dispatch."""
     # Field(None, ...) defaults leak FieldInfo when the tool fn is called
     # without those args (e.g. internally) — unwrap to the real default.
     from pydantic.fields import FieldInfo
@@ -331,31 +285,12 @@ async def _exec_tool(lang: str, send_fn, pane, code, codes, timeout, read_after,
     if read_after is not None and timeout is not None:
         raise ValueError("timeout and read_after are mutually exclusive")
 
-    target_panes = _resolve_panes(pane, panes)
-    _validate_multi(code, codes, "codes", target_panes)
-
-    if read_after is not None:
-        if target_panes is not None:
-            return await _gather_panes(
-                target_panes, code, codes,
-                lambda p, c: _read_after_on_pane(p, c, lang, read_after, tail))
-        require_pane(pane)
-        if guard_not_python:
-            _check_not_python(pane)
-        return await _read_after_on_pane(pane, code, lang, read_after, tail)
-
-    effective_timeout = timeout if timeout is not None else 3.0
-    if target_panes is not None:
-        if guard_not_python:
-            for p in target_panes:
-                _check_not_python(p)
-        return await _gather_panes(
-            target_panes, code, codes,
-            lambda p, c: _blocking_on_pane(p, c, send_fn, effective_timeout,
-                                           task_type=lang, tail=tail, force=force))
     require_pane(pane)
     if guard_not_python:
         _check_not_python(pane)
+    if read_after is not None:
+        return await _read_after_on_pane(pane, code, lang, read_after, tail)
+    effective_timeout = timeout if timeout is not None else 3.0
     return await _blocking_on_pane(pane, code, send_fn, effective_timeout,
                                    task_type=lang, tail=tail, force=force)
 
@@ -364,35 +299,27 @@ async def _exec_tool(lang: str, send_fn, pane, code, codes, timeout, read_after,
 # Execution tools
 # =============================================================================
 
-_TIMEOUT = ("seconds to wait before the command becomes a task (default 3, max 60). "
-            "Leave unset for long work. Excludes read_after.")
-_READ_AFTER = ("for a command that changes the prompt: send it, wait N seconds (max 60), "
-               "return the screen")
+_TIMEOUT = "seconds before the command becomes a task (default 3, max 60). Leave unset for long work."
+_READ_AFTER = "for a command that changes the prompt: wait N seconds (max 60) and return the screen"
 _TAIL = "last N lines only"
-_FORCE = "return long output whole instead of its ends"
-_PANES = "run on several panes at once"
-_CODES = "with panes: one code per pane"
+_FORCE = "whole long output, not just its ends"
 
 
 @mcp.tool()
 @_plain_defaults
 async def xpy(
-    pane: str = None,
+    pane: str,
     code: str = None,
-    codes: list[str] = Field(None, description=_CODES),
-    file: str = Field(None, description="local .py file run with exec() in the REPL's globals, instead of import or reload. Relative to your cwd."),
+    file: str = Field(None, description="local .py file run in the REPL's globals (instead of import or reload), relative to your cwd"),
     timeout: float = Field(None, description=_TIMEOUT),
     read_after: float = Field(None, description=_READ_AFTER),
     tail: int = Field(0, description=_TAIL),
     force: bool = Field(False, description=_FORCE),
-    panes: list[str] = Field(None, description=_PANES),
     ctx: Context = None
 ) -> str:
     """Run Python in a pane's REPL. A bare expression prints nothing: use print()."""
     send_py = send_python_code
     if file:
-        if codes:
-            raise ValueError("Use 'file' or 'codes', not both")
         client_cwd = await _get_client_cwd(ctx) if ctx else _client_cwd
         abs_path = _resolve_file_path(file, client_cwd)
         if not os.path.isfile(abs_path):
@@ -404,64 +331,39 @@ async def xpy(
         preview = f"# xpy file: {abs_path} ({len(content.splitlines())} lines)"
         send_py = functools.partial(send_python_code, preview=preview)
 
-    if not code and not codes:
-        raise ValueError("Either 'code', 'codes', or 'file' must be provided")
+    if not code:
+        raise ValueError("Either 'code' or 'file' must be provided")
 
-    return await _exec_tool("python", send_py, pane, code, codes, timeout, read_after,
-                            tail, force, panes)
+    return await _exec_tool("python", send_py, pane, code, timeout, read_after, tail, force)
 
 
 @mcp.tool()
 @_plain_defaults
 async def xtcl(
-    pane: str = None,
-    code: str = "",
-    codes: list[str] = Field(None, description=_CODES),
+    pane: str,
+    code: str,
     timeout: float = Field(None, description=_TIMEOUT),
     read_after: float = Field(None, description=_READ_AFTER),
     tail: int = Field(0, description=_TAIL),
     force: bool = Field(False, description=_FORCE),
-    panes: list[str] = Field(None, description=_PANES),
 ) -> str:
-    """Run TCL in a pane (TCL tool and other TCL tools). Keep code on one line: a newline breaks it."""
-    if not code and not codes:
-        raise ValueError("'code' or 'codes' must be provided")
-
-    return await _exec_tool("tcl", send_tcl_code, pane, code, codes, timeout, read_after,
-                            tail, force, panes)
+    """Run TCL in a pane (TCL tool and other TCL tools). Keep code on one line."""
+    return await _exec_tool("tcl", send_tcl_code, pane, code, timeout, read_after, tail, force)
 
 
 @mcp.tool()
 @_plain_defaults
 async def xsh(
-    pane: str = None,
-    code: str = None,
-    codes: list[str] = Field(None, description=_CODES),
-    file: str = Field(None, description="local script whose text runs in the pane's shell, also over ssh. Relative to your cwd."),
+    pane: str,
+    code: str,
     timeout: float = Field(None, description=_TIMEOUT),
     read_after: float = Field(None, description=_READ_AFTER),
     tail: int = Field(0, description=_TAIL),
     force: bool = Field(False, description=_FORCE),
-    panes: list[str] = Field(None, description=_PANES),
-    ctx: Context = None
 ) -> str:
     """Run a shell command in a pane."""
-    if file:
-        if codes:
-            raise ValueError("Use 'file' or 'codes', not both")
-        client_cwd = await _get_client_cwd(ctx) if ctx else _client_cwd
-        abs_path = _resolve_file_path(file, client_cwd)
-        if not os.path.isfile(abs_path):
-            raise FileNotFoundError(f"File not found: {abs_path}")
-        # Send file content as keystrokes so it also works on remote (ssh) shells.
-        # Runs in the current shell (inside the { } group), same as `source`.
-        code = open(abs_path).read().rstrip('\n')
-
-    if not code and not codes:
-        raise ValueError("Either 'code', 'codes', or 'file' must be provided")
-
-    return await _exec_tool("shell", send_shell_code, pane, code, codes, timeout, read_after,
-                            tail, force, panes, guard_not_python=True)
+    return await _exec_tool("shell", send_shell_code, pane, code, timeout, read_after,
+                            tail, force, guard_not_python=True)
 
 
 # =============================================================================
@@ -491,10 +393,7 @@ def task_output(
             task["cached_output"] = output
             tasks.finalize_task(task)
 
-    if not output:
-        return output
-
-    all_lines = output.split('\n')
+    all_lines = _output_lines(output)
     if head is not None and head > 0:
         all_lines = all_lines[:head]
     elif tail > 0 and len(all_lines) > tail:
@@ -873,7 +772,7 @@ def create_session(name: str, windows: list[str] = None, start_dir: str = None,
 
 @mcp.tool()
 @_plain_defaults
-def kill_session(name: str, force: bool = Field(False, description="required for a session you did not create")) -> str:
+def kill_session(name: str, force: bool = Field(False, description="needed for a session you did not create. Pass it only when the user asked.")) -> str:
     """Kill a session."""
     if not check_session(name):
         raise ValueError(f"Session '{name}' does not exist")
@@ -891,9 +790,14 @@ def kill_session(name: str, force: bool = Field(False, description="required for
 @mcp.tool()
 @_plain_defaults
 def create_window(session: str, name: str, start_dir: str = None, cmd: str = None) -> str:
-    """Add a window to a session you created, and register its pane."""
+    """Add a window to a session you created with create_session, and register its pane."""
     if not check_session(session):
         raise ValueError(f"Session '{session}' does not exist")
+    if registry._sessions.get(session, {}).get("owner") != MANAGED:
+        raise ValueError(
+            f"Session '{session}' was not created by create_session on this server, so "
+            f"its windows are not yours to add. Create your own session with create_session."
+        )
 
     existing = tmux.list_windows(session)
     if name in existing:
@@ -906,12 +810,6 @@ def create_window(session: str, name: str, start_dir: str = None, cmd: str = Non
         args.append(tmux.wrap_cmd(cmd))
     subprocess.run(tmux.build_tmux_command(args), capture_output=True)
 
-    if session not in registry._sessions:
-        registry._sessions[session] = {
-            "owner": EXTERNAL,
-            "created_at": time.time(),
-            "windows": {}
-        }
     registry._sessions[session]["windows"][name] = {"owner": MANAGED}
 
     pane_id = f"{session}:{name}.0"
@@ -922,7 +820,7 @@ def create_window(session: str, name: str, start_dir: str = None, cmd: str = Non
 
 @mcp.tool()
 @_plain_defaults
-def kill_window(session: str, window: str, force: bool = Field(False, description="required for a window you did not create")) -> str:
+def kill_window(session: str, window: str, force: bool = Field(False, description="needed for a window you did not create. Pass it only when the user asked.")) -> str:
     """Kill a window. Killing the last one ends the session."""
     if not check_session(session):
         raise ValueError(f"Session '{session}' does not exist")
@@ -958,10 +856,12 @@ def set_pane(pane: str, description: str) -> str:
 @mcp.tool()
 @_plain_defaults
 def respawn_pane(pane: str, start_dir: str = None,
-                 cmd: str = Field(None, description="command to start instead of bash")) -> str:
+                 cmd: str = Field(None, description="command to start instead of bash"),
+                 force: bool = Field(False, description="needed for a pane you did not create. Pass it only when the user asked.")) -> str:
     """Kill the pane's process and start a fresh shell. Clears its tasks and keeps its
     registration."""
     check_pane_registered(pane)
+    registry.check_ownership("Pane", pane, registry._working_panes[pane]["owner"], force)
     try:
         run_tmux_cmd(["list-panes", "-t", pane], raise_on_error=True)
     except RuntimeError as e:

@@ -27,6 +27,22 @@ def find_fingerprint(lines: list[str], fingerprint: list[str]) -> int | None:
     return None
 
 
+def _find_snapshot(lines: list[str], fingerprint: list[str]) -> int | None:
+    """Index of the first line after the earliest place where the fingerprint
+    stands either unchanged or with a command typed onto its last line. For
+    the typed-onto case the index points at that line, which is new content."""
+    *head, last = fingerprint
+    for i in range(len(lines) - len(fingerprint) + 1):
+        if lines[i:i + len(head)] != head:
+            continue
+        line = lines[i + len(head)]
+        if line == last:
+            return i + len(fingerprint)
+        if last and line.startswith(last):
+            return i + len(head)
+    return None
+
+
 def build_fingerprint(p: str) -> tuple[list[str], int]:
     """Snapshot current pane state for only_new mode polling.
 
@@ -47,17 +63,19 @@ def get_fresh_lines(lines: list[str], fingerprint: list[str], fingerprint_total:
     - Fingerprint's last line mutated (interactive prompt got a command
       typed onto it: "$" -> "$ cmd"): match without it; the mutated line
       counts as fresh — it IS new content.
+    - Whichever of those two comes first is the snapshot: a prompt drawn
+      again after the command is an exact copy that comes later.
     - Fingerprint scrolled out (50+ new lines): all lines (old content gone too).
     - Fingerprint changed by progress bars: empty list (wait more).
     """
     if fingerprint:
         stable_lines = [l for l in lines if not TQDM_PROGRESS_LINE.search(l)]
-        fp_end_stable = find_fingerprint(stable_lines, fingerprint)
+        fp_end_stable = _find_snapshot(stable_lines, fingerprint)
         if fp_end_stable is None and len(fingerprint) > 1:
             fp_end_stable = find_fingerprint(stable_lines, fingerprint[:-1])
         if fp_end_stable is not None:
             count = 0
-            cutoff = len(lines)
+            cutoff = 0 if fp_end_stable == 0 else len(lines)
             for i, line in enumerate(lines):
                 if not TQDM_PROGRESS_LINE.search(line):
                     count += 1

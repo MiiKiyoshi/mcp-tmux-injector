@@ -14,7 +14,8 @@ CLI agents can't natively talk to a live REPL or a long-running shell. This serv
 - **One event stream per connection**: At the start of every new MCP connection, including after a client or server restart, call `wait_events()` once and start its returned script exactly once using its instructions. Do not poll, start a duplicate, or assume an earlier waiter survived. Events queued before the waiter starts and unread events carried from a dead server are delivered when the new waiter starts. A promoted task reports `[done]`, `poll_pane(pattern)` reports `[match]`, and `task_output(task_id)` returns the full body.
 - **Memory, per pane or per session**: `mem_pane` sums whole process trees (host RSS + GPU), so a tool that forks helpers is accounted for. `mem_pane(session=…)` gives a per-pane table with a total, `session="*"` one row per session. `watch_mem(pane=… | session=…, rss_gb=…, gpu_gb=…)` is quiet under the cap and puts one breach report with the table on the event stream.
 - **Per-pane locking**: only one injected command runs on a pane at a time.
-- **Multi-pane dispatch**: `xsh`, `xpy` and `xtcl` take `panes=[…]` with either `code=` (same code to all) or `codes=[…]` (different code per pane).
+- **Your sessions stay yours**: in a session the agent did not create, it can run commands in the panes you let it register, but adding windows is refused, and killing or respawning anything takes `force=True`, which the agent passes only when you ask.
+- **Strict arguments**: a call with a parameter the tool does not take is refused, and the error lists the ones it does take.
 - **Works over ssh**: a pane that is ssh'd into another machine, or running a REPL there, behaves the same as a local one. Code is delivered as keystrokes, so nothing needs to exist on the remote filesystem: `file=` included.
 
 ## Requirements
@@ -67,7 +68,7 @@ The agent runs `xsh(pane, "python3", read_after=2)` then `xpy(pane, file="train.
 "Run training in each window of the work session with different configs"
 ```
 
-The agent dispatches to multiple panes via `panes=` + `codes=`.
+The agent sends one `xpy` or `xsh` call per window, each with its own config.
 
 **Check session state**
 
@@ -135,8 +136,13 @@ mcp_tmux_injector/
   watch.py      poll_pane / watch_mem threads + poll fingerprints
   server.py     MCP tool definitions, entry point
 tests/
-  test_pure.py  pure-function tests (no tmux needed): .venv/bin/python tests/test_pure.py
+  test_pure.py              pure functions, no tmux needed
+  test_surface.py           instructions size, schemas, argument checking
+  test_tools.py             every tool against a private tmux server on its own socket
+  test_wait_instructions.py event stream and client-specific waiting
 ```
+
+Run them with `pip install -e ".[dev]"` and then `python -m pytest -q`.
 
 ## License
 

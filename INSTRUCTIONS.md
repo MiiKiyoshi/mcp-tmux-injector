@@ -2,7 +2,7 @@
 
 Panes are the user's live terminals: the same shell, PATH and environment as the user, and every command has real consequences.
 
-Sessions: do your work in a session you create with create_session, even when only one other session exists, and kill one-off side sessions when done. In a session you did not create, run commands only in existing panes that are your task target (register them with set_pane), and never create or kill its windows. Do not run tmux new-session, kill-session, new-window or kill-window from your own shell. After compaction, ls(session=...) shows which panes are registered. After a server restart, ask the user which pane to use.
+Sessions: do your work in a session you create with create_session, even when another exists, and kill one-off side sessions when done. In a session you did not create, only run commands in panes that are your task target, registered with set_pane. Killing or respawning anything there takes force=True: pass it only when the user asked. Do not run tmux new-session, kill-session, new-window or kill-window, from your own shell or in a pane.
 
 Events: at the start of every new MCP connection, including after a client or server restart, call wait_events() once and start its script exactly once as it says. Do not poll, start a duplicate, or assume an earlier waiter survived. Unread events are kept until the script starts.
 

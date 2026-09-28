@@ -82,7 +82,6 @@ def send_python_code(session: str, code: str, begin: str, end: str, preview: str
         f"print({preview!r})\n"
         "print()\n"
         f"print('{begin}')\n"
-        "print()\n"
         f"try:\n{textwrap.indent(code, '    ')}\nexcept:\n    __import__('traceback').print_exc()\n"
         "print()\n"
         f"print('{end}')"

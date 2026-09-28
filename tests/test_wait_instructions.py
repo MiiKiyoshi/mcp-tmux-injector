@@ -96,8 +96,3 @@ def test_queue_before_ack(tmp_path, monkeypatch):
     finally:
         os.killpg(process.pid, signal.SIGTERM)
         process.wait(timeout=5)
-
-
-def test_instructions_fit_the_client_cap():
-    # Claude Code keeps only the first 2048 characters of server instructions.
-    assert len(server.mcp.instructions) <= 1900

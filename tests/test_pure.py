@@ -1,97 +1,70 @@
-#!/usr/bin/env python3
-"""Pure-function tests: filters, codec extraction, watch fingerprints.
-
-No tmux required. Run directly:
-    .venv/bin/python tests/test_pure.py
-"""
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
+"""Pure-function tests: tmux commands, markers, filters, fingerprints. No tmux needed."""
+from mcp_tmux_injector import tmux
 from mcp_tmux_injector.codec import extract_output, generate_marker, generate_task_id_and_marker
 from mcp_tmux_injector.filters import apply_dedupe, apply_output_filters
+from mcp_tmux_injector.server import _output_lines
 from mcp_tmux_injector.tasks import cmd_display
-from mcp_tmux_injector import tmux
 from mcp_tmux_injector.watch import find_fingerprint, get_fresh_lines
 
-FAILURES = []
+
+def test_tmux_command_uses_the_configured_socket(monkeypatch):
+    monkeypatch.setattr(tmux, "TMUX_SOCKET_PATH", None)
+    assert tmux.build_tmux_command(["list-sessions"]) == ["tmux", "list-sessions"]
+    monkeypatch.setattr(tmux, "TMUX_SOCKET_PATH", "/tmp/custom-tmux.sock")
+    assert tmux.build_tmux_command(["list-sessions"]) == ["tmux", "-S", "/tmp/custom-tmux.sock", "list-sessions"]
 
 
-def check(name, cond, detail=""):
-    if cond:
-        print(f"  [PASS] {name}")
-    else:
-        print(f"  [FAIL] {name}  {detail}")
-        FAILURES.append(name)
+def test_markers_and_extraction():
+    b, e = generate_marker()
+    assert b[:-2] == e[:-2] and b.endswith("B_") and e.endswith("E_")
+    tid, tb, _ = generate_task_id_and_marker()
+    assert tid[1:] in tb
+    assert extract_output(f"prompt$ cmd\n{b}\nhello\nworld\n{e}\nprompt$", b, e) == ("hello\nworld", True)
+    assert extract_output(f"{b}\npartial output", b, e) == ("partial output", False)
+    # An echoed command line that merely contains the marker is not the marker.
+    assert extract_output(f"echoed cmd containing {b} inline\n{b}\nx\n{e}", b, e) == ("x", True)
 
 
-# --- tmux command construction ---
-original_socket_path = tmux.TMUX_SOCKET_PATH
-tmux.TMUX_SOCKET_PATH = None
-check("tmux default socket", tmux.build_tmux_command(["list-sessions"]) == ["tmux", "list-sessions"])
-tmux.TMUX_SOCKET_PATH = "/tmp/custom-tmux.sock"
-check(
-    "tmux configured socket",
-    tmux.build_tmux_command(["list-sessions"]) ==
-    ["tmux", "-S", "/tmp/custom-tmux.sock", "list-sessions"],
-)
-tmux.TMUX_SOCKET_PATH = original_socket_path
+def test_output_lines_drop_only_the_final_newline():
+    assert _output_lines("a\nb\n") == ["a", "b"]
+    assert _output_lines("a\n\n") == ["a", ""]
+    assert _output_lines("a") == ["a"]
+    assert _output_lines("\n") == [""]  # the output of a bare `echo`
+    assert _output_lines("") == []
 
 
-# --- markers / extraction ---
-b, e = generate_marker()
-check("marker pair shares stem", b[:-2] == e[:-2] and b.endswith("B_") and e.endswith("E_"))
+def test_filters():
+    assert apply_dedupe(["a", "a", "b", "a"]) == ["a", "b", "a"]
+    assert apply_dedupe([]) == []
+    src = ["error: one", "ok", "error: two", "ok", "warn"]
+    assert apply_output_filters(src, grep="error") == "error: one\nerror: two"
+    assert apply_output_filters(src, grep="error: two", C=1) == "ok\nerror: two\nok"
+    assert apply_output_filters(["ERROR"], grep="(?i)error") == "ERROR"
+    assert apply_output_filters(src, grep=r"one\|warn") == "error: one\nwarn"
+    assert apply_output_filters(["x", "x", "y"]) == "x\ny"
 
-tid, tb, te = generate_task_id_and_marker()
-check("task id embedded in marker", tid[1:] in tb)
 
-raw = f"prompt$ cmd\n{b}\nhello\nworld\n{e}\nprompt$"
-out, done = extract_output(raw, b, e)
-check("extract between markers", out == "hello\nworld" and done)
+def test_fingerprints():
+    fp = ["l2", "l3"]
+    assert find_fingerprint(["l1", "l2", "l3", "l4"], fp) == 3
+    assert find_fingerprint(["a", "b"], fp) is None
+    assert find_fingerprint(["a"], []) is None
+    assert get_fresh_lines(["l1", "l2", "l3", "new1", "new2"], fp, 3) == ["new1", "new2"]
+    assert get_fresh_lines([f"x{i}" for i in range(60)], fp, 3) == [f"x{i}" for i in range(60)]
+    assert get_fresh_lines(["a", "b", "c"], fp, 3) == []
+    assert get_fresh_lines(["a", "b", "c"], [], 2) == ["c"]
+    # An interactive prompt line "$" that became "$ echo hi" still anchors.
+    assert get_fresh_lines(["l1", "l2", "$ echo hi", "hi"], ["l1", "l2", "$"], 3) == ["$ echo hi", "hi"]
+    assert get_fresh_lines(["$ echo hi", "hi"], ["$"], 1) == ["$ echo hi", "hi"]
+    # The prompt is drawn again after the command. That later exact copy is not the snapshot.
+    prompt = ["", "status", "$"]
+    after = ["", "status", "$ echo READY7", "READY7", "", "status", "$"]
+    assert get_fresh_lines(after, prompt, 3) == ["$ echo READY7", "READY7", "", "status", "$"]
+    # A blank last line is matched exactly, never as a prefix of any line.
+    assert get_fresh_lines(["x", "", "y"], ["x", ""], 2) == ["y"]
 
-out, done = extract_output(f"{b}\npartial output", b, e)
-check("extract incomplete (no end marker)", out == "partial output" and not done)
 
-out, done = extract_output(f"echoed cmd containing {b} inline\n{b}\nx\n{e}", b, e)
-check("echo line with marker substring not matched", out == "x" and done)
-
-# --- dedupe ---
-check("dedupe consecutive", apply_dedupe(["a", "a", "b", "a"]) == ["a", "b", "a"])
-check("dedupe empty", apply_dedupe([]) == [])
-
-# --- apply_output_filters ---
-src = ["error: one", "ok", "error: two", "ok", "warn"]
-check("grep", apply_output_filters(src, grep="error") == "error: one\nerror: two")
-check("grep context", apply_output_filters(src, grep="error: two", C=1) == "ok\nerror: two\nok")
-check("grep inline ignore-case", apply_output_filters(["ERROR"], grep="(?i)error") == "ERROR")
-check("grep \\| alternation", apply_output_filters(src, grep=r"one\|warn") == "error: one\nwarn")
-check("no grep dedupes only", apply_output_filters(["x", "x", "y"]) == "x\ny")
-
-# --- fingerprints ---
-fp = ["l2", "l3"]
-check("find_fingerprint", find_fingerprint(["l1", "l2", "l3", "l4"], fp) == 3)
-check("find_fingerprint missing", find_fingerprint(["a", "b"], fp) is None)
-check("find_fingerprint empty", find_fingerprint(["a"], []) is None)
-
-check("fresh lines after fingerprint",
-      get_fresh_lines(["l1", "l2", "l3", "new1", "new2"], fp, 3) == ["new1", "new2"])
-check("fresh lines fp scrolled out",
-      get_fresh_lines([f"x{i}" for i in range(60)], fp, 3) == [f"x{i}" for i in range(60)])
-check("fresh lines fp changed -> wait",
-      get_fresh_lines(["a", "b", "c"], fp, 3) == [])
-check("fresh lines no fp -> beyond total",
-      get_fresh_lines(["a", "b", "c"], [], 2) == ["c"])
-# 대화형 프롬프트 변형: 지문 마지막 줄 "$"가 "$ echo hi"로 바뀐 경우
-check("fresh lines mutated prompt line",
-      get_fresh_lines(["l1", "l2", "$ echo hi", "hi"], ["l1", "l2", "$"], 3) == ["$ echo hi", "hi"])
-check("fresh lines single-line fp mutated -> wait (no [:-1] retry)",
-      get_fresh_lines(["$ echo hi", "hi"], ["$"], 1) == [])
-
-# --- cmd_display ---
-check("cmd_display short", cmd_display("ls") == "ls")
-check("cmd_display truncates", cmd_display("x" * 50) == "x" * 37 + "...")
-check("cmd_display flattens newlines", cmd_display("a\nb") == "a b")
-
-print(f"\n{len(FAILURES)} failure(s)" if FAILURES else "\nall passed")
-sys.exit(1 if FAILURES else 0)
+def test_cmd_display():
+    assert cmd_display("ls") == "ls"
+    assert cmd_display("x" * 50) == "x" * 37 + "..."
+    assert cmd_display("a\nb") == "a b"

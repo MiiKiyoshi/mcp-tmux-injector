@@ -91,11 +91,10 @@ def session_info_str(session_name: str) -> str:
 def check_ownership(resource_type: str, name: str, owner: str, force: bool) -> None:
     """Raise error if resource is external and force is False."""
     if owner == EXTERNAL and not force:
-        session_name = name.split(":")[0] if resource_type == "Window" else name
-        info_str = session_info_str(session_name)
+        info_str = session_info_str(name.split(":")[0])
         raise ValueError(
-            f"{resource_type} '{name}' is {EXTERNAL} (not created by MCP).\n"
-            f"Use force=True to override (requires user confirmation).\n\n"
+            f"{resource_type} '{name}' was not created on this server, so it is the "
+            f"user's. Pass force=True only when the user asked for this.\n\n"
             f"{info_str}"
         )
 
