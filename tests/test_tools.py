@@ -100,7 +100,8 @@ def test_screen_watch_and_keys(stream):
     assert call("capture_pane", pane=A, tail=20, grep="(?i)^MARKER-LINE$") == "marker-line"
     assert "[watching]" in call("poll_pane", pane=B, pattern=r"READY\d")
     assert call("send_text", pane=B, text="echo READY7") == "Text sent"
-    assert wait_for(lambda: f"[match] {B}" in stream())
+    # The match is the output line, not the typed command that contains the pattern.
+    assert wait_for(lambda: f"[match] {B}: READY7\n" in stream())
     promoted = call("xsh", pane=B, code="sleep 30")
     task_id = promoted.split()[2]
     assert call("send_keys", pane=B, keys="C-c") == "Keys sent"

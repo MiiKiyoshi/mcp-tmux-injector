@@ -53,13 +53,15 @@ def test_fingerprints():
     assert get_fresh_lines([f"x{i}" for i in range(60)], fp, 3) == [f"x{i}" for i in range(60)]
     assert get_fresh_lines(["a", "b", "c"], fp, 3) == []
     assert get_fresh_lines(["a", "b", "c"], [], 2) == ["c"]
-    # An interactive prompt line "$" that became "$ echo hi" still anchors.
-    assert get_fresh_lines(["l1", "l2", "$ echo hi", "hi"], ["l1", "l2", "$"], 3) == ["$ echo hi", "hi"]
-    assert get_fresh_lines(["$ echo hi", "hi"], ["$"], 1) == ["$ echo hi", "hi"]
+    # A prompt line "$" that became "$ echo hi" still anchors, and the typed command is not fresh.
+    assert get_fresh_lines(["l1", "l2", "$ echo hi", "hi"], ["l1", "l2", "$"], 3) == ["hi"]
+    assert get_fresh_lines(["$ echo hi", "hi"], ["$"], 1) == ["hi"]
     # The prompt is drawn again after the command. That later exact copy is not the snapshot.
     prompt = ["", "status", "$"]
     after = ["", "status", "$ echo READY7", "READY7", "", "status", "$"]
-    assert get_fresh_lines(after, prompt, 3) == ["$ echo READY7", "READY7", "", "status", "$"]
+    assert get_fresh_lines(after, prompt, 3) == ["READY7", "", "status", "$"]
+    # A last line replaced by other content is output, so it is fresh.
+    assert get_fresh_lines(["l1", "l2", "done", "x"], ["l1", "l2", "working"], 3) == ["done", "x"]
     # A blank last line is matched exactly, never as a prefix of any line.
     assert get_fresh_lines(["x", "", "y"], ["x", ""], 2) == ["y"]
 

@@ -29,17 +29,13 @@ def find_fingerprint(lines: list[str], fingerprint: list[str]) -> int | None:
 
 def _find_snapshot(lines: list[str], fingerprint: list[str]) -> int | None:
     """Index of the first line after the earliest place where the fingerprint
-    stands either unchanged or with a command typed onto its last line. For
-    the typed-onto case the index points at that line, which is new content."""
+    stands, unchanged or with a command typed onto its last line. A typed
+    command is input, not output, so its line is not fresh."""
     *head, last = fingerprint
     for i in range(len(lines) - len(fingerprint) + 1):
-        if lines[i:i + len(head)] != head:
-            continue
         line = lines[i + len(head)]
-        if line == last:
+        if lines[i:i + len(head)] == head and (line == last or (last and line.startswith(last))):
             return i + len(fingerprint)
-        if last and line.startswith(last):
-            return i + len(head)
     return None
 
 
@@ -59,12 +55,13 @@ def build_fingerprint(p: str) -> tuple[list[str], int]:
 def get_fresh_lines(lines: list[str], fingerprint: list[str], fingerprint_total: int) -> list[str]:
     """Return lines that appeared after the fingerprint snapshot.
 
-    - Fingerprint found: lines after it.
-    - Fingerprint's last line mutated (interactive prompt got a command
-      typed onto it: "$" -> "$ cmd"): match without it; the mutated line
-      counts as fresh — it IS new content.
-    - Whichever of those two comes first is the snapshot: a prompt drawn
-      again after the command is an exact copy that comes later.
+    - Fingerprint found, unchanged or with a command typed onto its last line
+      ("$" -> "$ cmd"): lines after it. The typed command is input, so a
+      pattern in its text does not match.
+    - The earliest such place is the snapshot: a prompt drawn again after the
+      command is an exact copy that comes later.
+    - Fingerprint's last line replaced by other content: match without it;
+      the replaced line counts as fresh.
     - Fingerprint scrolled out (50+ new lines): all lines (old content gone too).
     - Fingerprint changed by progress bars: empty list (wait more).
     """
@@ -75,7 +72,7 @@ def get_fresh_lines(lines: list[str], fingerprint: list[str], fingerprint_total:
             fp_end_stable = find_fingerprint(stable_lines, fingerprint[:-1])
         if fp_end_stable is not None:
             count = 0
-            cutoff = 0 if fp_end_stable == 0 else len(lines)
+            cutoff = len(lines)
             for i, line in enumerate(lines):
                 if not TQDM_PROGRESS_LINE.search(line):
                     count += 1
