@@ -144,11 +144,9 @@ def watch_mem(pane: str | None, session: str | None, rss_gb: float | None,
 
 
 def watch_pane(pane: str, pattern: str, fp_lines: list[str], fp_total: int,
-               only_new: bool, ignore_case: bool, literal: bool) -> None:
+               only_new: bool) -> None:
     """Thread: poll for a pattern, report the first matching line."""
-    flags = re.IGNORECASE if ignore_case else 0
-    pat = re.escape(pattern) if literal else pattern
-    regex = re.compile(pat, flags)
+    regex = re.compile(pattern)
 
     interval = 0.5
     max_interval = 10.0

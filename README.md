@@ -12,10 +12,9 @@ CLI agents can't natively talk to a live REPL or a long-running shell. This serv
   - Default mode waits up to 3 seconds, then turns unfinished work into a background task and returns its `task_id`. Known-slow work leaves the inline timeout unset so this response returns before the MCP client request expires.
   - `read_after=N` skips the wait-for-completion logic: sends the code, sleeps N seconds, returns the pane's screen content. Use when the prompt itself is changing (entering a REPL, ssh, exit).
 - **One event stream per connection**: At the start of every new MCP connection, including after a client or server restart, call `wait_events()` once and start its returned script exactly once using its instructions. Do not poll, start a duplicate, or assume an earlier waiter survived. Events queued before the waiter starts and unread events carried from a dead server are delivered when the new waiter starts. A promoted task reports `[done]`, `poll_pane(pattern)` reports `[match]`, and `task_output(task_id)` returns the full body.
-- **Save output to a file**: `task_output(save=path)` and `capture_pane(save=path)` write filtered output to disk.
 - **Memory, per pane or per session**: `mem_pane` sums whole process trees (host RSS + GPU), so a tool that forks helpers is accounted for. `mem_pane(session=…)` gives a per-pane table with a total, `session="*"` one row per session. `watch_mem(pane=… | session=…, rss_gb=…, gpu_gb=…)` is quiet under the cap and puts one breach report with the table on the event stream.
 - **Per-pane locking**: only one injected command runs on a pane at a time.
-- **Multi-pane dispatch**: `panes=[…]` with either `code=` (same code to all) or `codes=[…]` (different code per pane).
+- **Multi-pane dispatch**: `xsh`, `xpy` and `xtcl` take `panes=[…]` with either `code=` (same code to all) or `codes=[…]` (different code per pane).
 - **Works over ssh**: a pane that is ssh'd into another machine, or running a REPL there, behaves the same as a local one. Code is delivered as keystrokes, so nothing needs to exist on the remote filesystem: `file=` included.
 
 ## Requirements
@@ -119,7 +118,7 @@ Patterns use [fnmatch](https://docs.python.org/3/library/fnmatch.html) and match
 
 ## Tool reference
 
-See [INSTRUCTIONS.md](INSTRUCTIONS.md).
+Each tool describes its own parameters to the agent. [INSTRUCTIONS.md](INSTRUCTIONS.md) holds the rules the agent loads in every session, kept under the 2048 characters Claude Code shows.
 
 ## Code layout
 
@@ -128,7 +127,7 @@ mcp_tmux_injector/
   config.py     deny-list, instructions, shared paths
   tmux.py       tmux primitives (run, capture, sessions/windows)
   codec.py      markers, code delivery (keystroke-only, ssh-safe), extraction
-  filters.py    output filtering (tqdm/grep/dedupe/save)
+  filters.py    output filtering (grep with context, dedupe)
   tasks.py      background task registry, pane locks
   registry.py   pane/session registration, ownership, cleanup
   mem.py        per-pane process-tree memory (host RSS + GPU), host totals

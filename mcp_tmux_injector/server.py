@@ -21,7 +21,7 @@ from .codec import (
     send_tcl_code,
 )
 from .config import INSTRUCTIONS, check_deny
-from .filters import apply_output_filters, parse_rel_range
+from .filters import apply_output_filters
 from .registry import EXTERNAL, MANAGED, check_pane_registered, require_pane
 from .tmux import check_session, run_tmux_cmd
 from . import mem as memmod
@@ -53,7 +53,20 @@ def _wait_method(ctx: Context) -> str:
     )
 
 
-mcp = FastMCP("tmux-injector", instructions=INSTRUCTIONS)
+class _Server(FastMCP):
+    """FastMCP without pydantic's generated schema titles: they repeat each
+    parameter name and cost every client that loads the tool."""
+
+    async def list_tools(self):
+        tools = await super().list_tools()
+        for tool in tools:
+            tool.inputSchema.pop("title", None)
+            for prop in tool.inputSchema["properties"].values():
+                prop.pop("title", None)
+        return tools
+
+
+mcp = _Server("tmux-injector", instructions=INSTRUCTIONS)
 
 
 def _plain_defaults(fn):
@@ -178,33 +191,6 @@ def _format_multi_result(results: dict[str, str]) -> str:
     return "\n\n".join(parts)
 
 
-def _resolve_task_id(task_id: str | None, pane: str | None) -> str:
-    """Resolve task_id from either direct ID or pane lookup."""
-    if task_id is not None and pane is not None:
-        raise ValueError("Use 'task_id' or 'pane', not both")
-    if task_id is not None:
-        return task_id
-    if pane is not None:
-        check_pane_registered(pane)
-        result = tasks.find_active_task_on_pane(pane)
-        if result is None:
-            raise ValueError(f"No task found on pane '{pane}'")
-        return result[0]
-    raise ValueError("Either 'task_id' or 'pane' must be provided")
-
-
-def _resolve_task_ids_from_panes(panes: list[str]) -> list[str]:
-    """Resolve task IDs from a list of panes."""
-    result = []
-    for p in panes:
-        check_pane_registered(p)
-        active = tasks.find_active_task_on_pane(p)
-        if active is None:
-            raise ValueError(f"No task found on pane '{p}'")
-        result.append(active[0])
-    return result
-
-
 def _get_task(task_id: str) -> dict:
     if task_id not in tasks._tasks:
         raise ValueError(f"Task '{task_id}' not found")
@@ -219,7 +205,7 @@ _LARGE_OUTPUT_THRESHOLD = 200
 _LARGE_OUTPUT_PREVIEW = 20
 
 
-async def _blocking_on_pane(p: str, code: str, send_fn, timeout: float, filter_kwargs: dict, task_type: str = "shell", tail: int = 0, head: int = None, force: bool = False) -> str:
+async def _blocking_on_pane(p: str, code: str, send_fn, timeout: float, task_type: str = "shell", tail: int = 0, force: bool = False) -> str:
     """Execute blocking command on a single pane and return filtered output."""
     lock = tasks.acquire_pane_lock(p)
     task_id, begin, end = generate_task_id_and_marker()
@@ -229,11 +215,9 @@ async def _blocking_on_pane(p: str, code: str, send_fn, timeout: float, filter_k
         send_fn(p, code, begin, end)
         output = await tasks.capture_output_blocking(p, begin, end, timeout)
         lines = output.split('\n') if output else []
-        if head is not None and head > 0:
-            lines = lines[:head]
-        elif tail > 0 and len(lines) > tail:
+        if tail > 0 and len(lines) > tail:
             lines = lines[-tail:]
-        filtered = apply_output_filters(lines, n_negative=False, **filter_kwargs)
+        filtered = apply_output_filters(lines)
 
         filtered_lines = filtered.split('\n') if filtered else []
         if not force and len(filtered_lines) > _LARGE_OUTPUT_THRESHOLD:
@@ -250,7 +234,7 @@ async def _blocking_on_pane(p: str, code: str, send_fn, timeout: float, filter_k
             omitted = len(filtered_lines) - n * 2
             return (
                 f"[Large output: {len(filtered_lines)} lines → {task_id}]\n"
-                f"task_output(task_id=\"{task_id}\", tail=/head=/range=) to retrieve.\n\n"
+                f"task_output(task_id=\"{task_id}\", tail=/head=/grep=) to retrieve.\n\n"
                 f"{head_part}\n\n... {omitted} lines omitted ...\n\n{tail_part}"
             )
 
@@ -283,8 +267,7 @@ async def _blocking_on_pane(p: str, code: str, send_fn, timeout: float, filter_k
             lock.release()
 
 
-async def _read_after_on_pane(p: str, code: str, lang: str, read_after: float,
-                              fkw: dict, tail: int, head: int) -> str:
+async def _read_after_on_pane(p: str, code: str, lang: str, read_after: float, tail: int) -> str:
     """Send code, sleep, capture from begin marker. No end marker — used for
     prompt-changing commands (entering REPL, ssh, exit) where marker pairs
     don't survive prompt changes.
@@ -311,11 +294,9 @@ async def _read_after_on_pane(p: str, code: str, lang: str, read_after: float,
             if capturing:
                 result.append(line)
 
-        if head is not None and head > 0:
-            result = result[:head]
-        elif tail > 0 and len(result) > tail:
+        if tail > 0 and len(result) > tail:
             result = result[-tail:]
-        return apply_output_filters(result, n_negative=False, **fkw)
+        return apply_output_filters(result)
     finally:
         lock.release()
 
@@ -338,7 +319,7 @@ async def _gather_panes(target_panes: list[str], code: str, codes: list[str] | N
 
 
 async def _exec_tool(lang: str, send_fn, pane, code, codes, timeout, read_after,
-                     tail, head, force, fkw, panes, guard_not_python: bool = False) -> str:
+                     tail, force, panes, guard_not_python: bool = False) -> str:
     """Shared body of xpy/xtcl/xsh: mode dispatch and single/multi routing."""
     # Field(None, ...) defaults leak FieldInfo when the tool fn is called
     # without those args (e.g. internally) — unwrap to the real default.
@@ -357,11 +338,11 @@ async def _exec_tool(lang: str, send_fn, pane, code, codes, timeout, read_after,
         if target_panes is not None:
             return await _gather_panes(
                 target_panes, code, codes,
-                lambda p, c: _read_after_on_pane(p, c, lang, read_after, fkw, tail, head))
+                lambda p, c: _read_after_on_pane(p, c, lang, read_after, tail))
         require_pane(pane)
         if guard_not_python:
             _check_not_python(pane)
-        return await _read_after_on_pane(pane, code, lang, read_after, fkw, tail, head)
+        return await _read_after_on_pane(pane, code, lang, read_after, tail)
 
     effective_timeout = timeout if timeout is not None else 3.0
     if target_panes is not None:
@@ -370,49 +351,44 @@ async def _exec_tool(lang: str, send_fn, pane, code, codes, timeout, read_after,
                 _check_not_python(p)
         return await _gather_panes(
             target_panes, code, codes,
-            lambda p, c: _blocking_on_pane(p, c, send_fn, effective_timeout, fkw,
-                                           task_type=lang, tail=tail, head=head, force=force))
+            lambda p, c: _blocking_on_pane(p, c, send_fn, effective_timeout,
+                                           task_type=lang, tail=tail, force=force))
     require_pane(pane)
     if guard_not_python:
         _check_not_python(pane)
-    return await _blocking_on_pane(pane, code, send_fn, effective_timeout, fkw,
-                                   task_type=lang, tail=tail, head=head, force=force)
+    return await _blocking_on_pane(pane, code, send_fn, effective_timeout,
+                                   task_type=lang, tail=tail, force=force)
 
 
 # =============================================================================
 # Execution tools
 # =============================================================================
 
+_TIMEOUT = ("seconds to wait before the command becomes a task (default 3, max 60). "
+            "Leave unset for long work. Excludes read_after.")
+_READ_AFTER = ("for a command that changes the prompt: send it, wait N seconds (max 60), "
+               "return the screen")
+_TAIL = "last N lines only"
+_FORCE = "return long output whole instead of its ends"
+_PANES = "run on several panes at once"
+_CODES = "with panes: one code per pane"
+
+
 @mcp.tool()
 @_plain_defaults
 async def xpy(
     pane: str = None,
     code: str = None,
-    codes: list[str] = None,
-    file: str = Field(None, description="Execute a .py file via exec(). Path resolved relative to agent cwd. Use instead of code='exec(open(...).read())'"),
-    timeout: float = Field(None, description="Optional inline wait before auto-promotion (default 3s, capped at 60s). Leave unset for long work so promotion returns before the MCP client request expires. Mutually exclusive with read_after."),
-    read_after: float = Field(None, description="read_after mode: skip end-marker detection, send code, sleep N seconds, return pane capture from begin marker. For prompt-changing commands (entering/exiting REPL, ssh). Capped at 60s. Mutually exclusive with timeout."),
-    tail: int = 0,
-    head: int = None,
-    force: bool = Field(False, description="return full output without truncation"),
-    grep: str = None,
-    v: str = Field(None, description="exclude matching (grep -v)"),
-    i: bool = Field(False, description="case insensitive (grep -i)"),
-    w: bool = Field(False, description="whole word match (grep -w)"),
-    F: bool = Field(False, description="literal string, not regex (grep -F)"),
-    m: int = Field(None, description="max matching lines (grep -m)"),
-    A: int = Field(None, description="lines after match (grep -A)"),
-    B: int = Field(None, description="lines before match (grep -B)"),
-    C: int = Field(None, description="context lines around match (grep -C)"),
-    n: bool = Field(False, description="show line numbers (grep -n)"),
-    uniq: bool = True,
-    strip_tqdm: bool = Field(False, description="remove tqdm lines, keep last group"),
-    panes: list[str] = None,
+    codes: list[str] = Field(None, description=_CODES),
+    file: str = Field(None, description="local .py file run with exec() in the REPL's globals, instead of import or reload. Relative to your cwd."),
+    timeout: float = Field(None, description=_TIMEOUT),
+    read_after: float = Field(None, description=_READ_AFTER),
+    tail: int = Field(0, description=_TAIL),
+    force: bool = Field(False, description=_FORCE),
+    panes: list[str] = Field(None, description=_PANES),
     ctx: Context = None
 ) -> str:
-    """Execute Python code in tmux. Default mode auto-promotes to a task on
-    timeout. read_after mode skips marker detection (use for entering/exiting
-    REPLs, ssh). On abort/timeout, code was already sent — do NOT resend."""
+    """Run Python in a pane's REPL. A bare expression prints nothing: use print()."""
     send_py = send_python_code
     if file:
         if codes:
@@ -431,9 +407,8 @@ async def xpy(
     if not code and not codes:
         raise ValueError("Either 'code', 'codes', or 'file' must be provided")
 
-    fkw = dict(grep=grep, v=v, i=i, w=w, F=F, m=m, A=A, B=B, C=C, n=n, uniq=uniq, strip_tqdm=strip_tqdm)
     return await _exec_tool("python", send_py, pane, code, codes, timeout, read_after,
-                            tail, head, force, fkw, panes)
+                            tail, force, panes)
 
 
 @mcp.tool()
@@ -441,35 +416,19 @@ async def xpy(
 async def xtcl(
     pane: str = None,
     code: str = "",
-    codes: list[str] = None,
-    timeout: float = Field(None, description="Optional inline wait before auto-promotion (default 3s, capped at 60s). Leave unset for long work so promotion returns before the MCP client request expires. Mutually exclusive with read_after."),
-    read_after: float = Field(None, description="read_after mode: skip end-marker detection, send code, sleep N seconds, return pane capture from begin marker. For prompt-changing commands (entering/exiting REPL, ssh). Capped at 60s. Mutually exclusive with timeout."),
-    tail: int = 0,
-    head: int = None,
-    force: bool = Field(False, description="return full output without truncation"),
-    grep: str = None,
-    v: str = Field(None, description="exclude matching (grep -v)"),
-    i: bool = Field(False, description="case insensitive (grep -i)"),
-    w: bool = Field(False, description="whole word match (grep -w)"),
-    F: bool = Field(False, description="literal string, not regex (grep -F)"),
-    m: int = Field(None, description="max matching lines (grep -m)"),
-    A: int = Field(None, description="lines after match (grep -A)"),
-    B: int = Field(None, description="lines before match (grep -B)"),
-    C: int = Field(None, description="context lines around match (grep -C)"),
-    n: bool = Field(False, description="show line numbers (grep -n)"),
-    uniq: bool = True,
-    strip_tqdm: bool = Field(False, description="remove tqdm lines, keep last group"),
-    panes: list[str] = None
+    codes: list[str] = Field(None, description=_CODES),
+    timeout: float = Field(None, description=_TIMEOUT),
+    read_after: float = Field(None, description=_READ_AFTER),
+    tail: int = Field(0, description=_TAIL),
+    force: bool = Field(False, description=_FORCE),
+    panes: list[str] = Field(None, description=_PANES),
 ) -> str:
-    """Execute TCL code in tmux. Default mode auto-promotes to a task on
-    timeout. read_after mode skips marker detection (use for entering/exiting
-    REPLs). On abort/timeout, code was already sent — do NOT resend."""
+    """Run TCL in a pane (TCL tool and other TCL tools). Keep code on one line: a newline breaks it."""
     if not code and not codes:
         raise ValueError("'code' or 'codes' must be provided")
 
-    fkw = dict(grep=grep, v=v, i=i, w=w, F=F, m=m, A=A, B=B, C=C, n=n, uniq=uniq, strip_tqdm=strip_tqdm)
     return await _exec_tool("tcl", send_tcl_code, pane, code, codes, timeout, read_after,
-                            tail, head, force, fkw, panes)
+                            tail, force, panes)
 
 
 @mcp.tool()
@@ -477,31 +436,16 @@ async def xtcl(
 async def xsh(
     pane: str = None,
     code: str = None,
-    codes: list[str] = None,
-    file: str = None,
-    timeout: float = Field(None, description="Optional inline wait before auto-promotion (default 3s, capped at 60s). Leave unset for long work so promotion returns before the MCP client request expires. Mutually exclusive with read_after."),
-    read_after: float = Field(None, description="read_after mode: skip end-marker detection, send code, sleep N seconds, return pane capture from begin marker. For prompt-changing commands (entering/exiting REPL, ssh). Capped at 60s. Mutually exclusive with timeout."),
-    tail: int = 0,
-    head: int = None,
-    force: bool = Field(False, description="return full output without truncation"),
-    grep: str = None,
-    v: str = Field(None, description="exclude matching (grep -v)"),
-    i: bool = Field(False, description="case insensitive (grep -i)"),
-    w: bool = Field(False, description="whole word match (grep -w)"),
-    F: bool = Field(False, description="literal string, not regex (grep -F)"),
-    m: int = Field(None, description="max matching lines (grep -m)"),
-    A: int = Field(None, description="lines after match (grep -A)"),
-    B: int = Field(None, description="lines before match (grep -B)"),
-    C: int = Field(None, description="context lines around match (grep -C)"),
-    n: bool = Field(False, description="show line numbers (grep -n)"),
-    uniq: bool = True,
-    strip_tqdm: bool = Field(False, description="remove tqdm lines, keep last group"),
-    panes: list[str] = None,
+    codes: list[str] = Field(None, description=_CODES),
+    file: str = Field(None, description="local script whose text runs in the pane's shell, also over ssh. Relative to your cwd."),
+    timeout: float = Field(None, description=_TIMEOUT),
+    read_after: float = Field(None, description=_READ_AFTER),
+    tail: int = Field(0, description=_TAIL),
+    force: bool = Field(False, description=_FORCE),
+    panes: list[str] = Field(None, description=_PANES),
     ctx: Context = None
 ) -> str:
-    """Execute shell command in tmux. Default mode auto-promotes to a task on
-    timeout. read_after mode skips marker detection (use for entering/exiting
-    REPLs, ssh). On abort/timeout, code was already sent — do NOT resend."""
+    """Run a shell command in a pane."""
     if file:
         if codes:
             raise ValueError("Use 'file' or 'codes', not both")
@@ -516,47 +460,29 @@ async def xsh(
     if not code and not codes:
         raise ValueError("Either 'code', 'codes', or 'file' must be provided")
 
-    fkw = dict(grep=grep, v=v, i=i, w=w, F=F, m=m, A=A, B=B, C=C, n=n, uniq=uniq, strip_tqdm=strip_tqdm)
     return await _exec_tool("shell", send_shell_code, pane, code, codes, timeout, read_after,
-                            tail, head, force, fkw, panes, guard_not_python=True)
+                            tail, force, panes, guard_not_python=True)
 
 
 # =============================================================================
 # Task tools
 # =============================================================================
 
+_GREP = "Python regex, keeps matching lines. (?i) ignores case."
+_CONTEXT = "lines of context around each grep match"
+
+
 @mcp.tool()
 @_plain_defaults
-def task_status(task_id: str = None, pane: str = None) -> str:
-    """Check task status and return the next completion action."""
-    resolved_id = _resolve_task_id(task_id, pane)
-    task = _get_task(resolved_id)
-    completed = tasks.refresh_task(task)
-    disp = tasks.cmd_display(task.get("command", ""))
-
-    if completed:
-        status = "error" if "error" in task else "completed"
-        elapsed = task["end_time"] - task["start_time"]
-        return (
-            f"[{status}] {elapsed:.1f}s  {task['pane']}  \"{disp}\"\n"
-            f'next: task_output(task_id="{resolved_id}")'
-        )
-
-    elapsed = time.time() - task["start_time"]
-    return (
-        f"[running] {elapsed:.1f}s  {task['pane']}  \"{disp}\"\n"
-        f"next: [done] arrives on the event stream" + events.waiter_note()
-    )
-
-
-def _get_single_task_output(
-    tid: str, tail: int, head: int, line_range: str,
-    save: str, append: bool, prefix: str, suffix: str,
-    include_command: bool, command_prefix: str, markdown: bool,
-    filter_kwargs: dict
+def task_output(
+    task_id: str,
+    tail: int = Field(0, description="last N lines"),
+    head: int = Field(None, description="first N lines"),
+    grep: str = Field(None, description=_GREP),
+    C: int = Field(0, description=_CONTEXT),
 ) -> str:
-    """Get filtered output for a single task."""
-    task = _get_task(tid)
+    """Output of a task so far, without waiting."""
+    task = _get_task(task_id)
     if "cached_output" in task:
         output = task["cached_output"]
     else:
@@ -569,123 +495,25 @@ def _get_single_task_output(
         return output
 
     all_lines = output.split('\n')
-
-    if line_range:
-        parts = line_range.split(":")
-        start = int(parts[0]) if parts[0].strip() else 0
-        end = int(parts[1]) if parts[1].strip() else len(all_lines)
-        all_lines = all_lines[start:end]
-    elif head is not None and head > 0:
+    if head is not None and head > 0:
         all_lines = all_lines[:head]
     elif tail > 0 and len(all_lines) > tail:
         all_lines = all_lines[-tail:]
-
-    if save and (markdown or include_command):
-        lang = task.get("type", "")
-        cmd = task.get("command", "")
-        if include_command:
-            all_lines = [f"{command_prefix}{cmd}"] + all_lines
-        if markdown:
-            md_prefix = f"```{lang}\n"
-            md_suffix = "\n```"
-        else:
-            md_prefix = ""
-            md_suffix = ""
-        effective_prefix = (prefix or '') + md_prefix
-        effective_suffix = md_suffix + (suffix or '')
-    else:
-        effective_prefix = prefix
-        effective_suffix = suffix
-
-    return apply_output_filters(
-        all_lines, n_negative=False,
-        save=save, append=append, prefix=effective_prefix, suffix=effective_suffix,
-        **filter_kwargs
-    )
-
-
-@mcp.tool()
-@_plain_defaults
-def task_output(
-    task_id: str = None,
-    task_ids: list[str] = None,
-    pane: str = None,
-    panes: list[str] = None,
-    tail: int = 0,
-    head: int = None,
-    range: str = None,
-    grep: str = None,
-    v: str = Field(None, description="exclude matching (grep -v)"),
-    i: bool = Field(False, description="case insensitive (grep -i)"),
-    w: bool = Field(False, description="whole word match (grep -w)"),
-    F: bool = Field(False, description="literal string, not regex (grep -F)"),
-    m: int = Field(None, description="max matching lines (grep -m)"),
-    A: int = Field(None, description="lines after match (grep -A)"),
-    B: int = Field(None, description="lines before match (grep -B)"),
-    C: int = Field(None, description="context lines around match (grep -C)"),
-    n: bool = Field(False, description="show line numbers (grep -n)"),
-    uniq: bool = True,
-    strip_tqdm: bool = Field(False, description="remove tqdm lines, keep last group"),
-    save: str = None,
-    append: bool = True,
-    prefix: str = None,
-    suffix: str = None,
-    include_command: bool = False,
-    command_prefix: str = "$ ",
-    markdown: bool = False
-) -> str:
-    """Get task output (non-blocking)."""
-    # Resolve pane/panes to task_id/task_ids
-    if pane is not None:
-        task_id = _resolve_task_id(None, pane)
-    if panes is not None:
-        task_ids = _resolve_task_ids_from_panes(panes)
-
-    specified = sum(x is not None for x in [task_id, task_ids])
-    if specified != 1:
-        raise ValueError("Exactly one of task_id/task_ids/pane/panes must be specified")
-
-    fkw = dict(grep=grep, v=v, i=i, w=w, F=F, m=m, A=A, B=B, C=C, n=n, uniq=uniq, strip_tqdm=strip_tqdm)
-
-    if task_ids is not None:
-        results = {}
-        for tid in task_ids:
-            results[tid] = _get_single_task_output(
-                tid, tail, head, range, save, append, prefix, suffix,
-                include_command, command_prefix, markdown, fkw
-            )
-        return _format_multi_result(results)
-
-    return _get_single_task_output(
-        task_id, tail, head, range, save, append, prefix, suffix,
-        include_command, command_prefix, markdown, fkw
-    )
+    return apply_output_filters(all_lines, grep, C)
 
 
 @mcp.tool()
 @_plain_defaults
 def mem_pane(
     pane: str = None,
-    panes: list[str] = Field(None, description="several panes at once"),
-    session: str = Field(None, description="whole session: per-pane table plus total. '*' = one row per session, host-wide."),
-    gpu: bool = Field(True, description="include GPU memory (skip if nvidia-smi is slow or absent)"),
+    session: str = Field(None, description="per-pane table with a total, including unregistered panes. '*' gives one row per session."),
+    gpu: bool = Field(True, description="include GPU memory"),
 ) -> str:
-    """Memory held by a pane's process tree, right now — host RSS and GPU.
-
-    Sums the whole tree under the pane's shell, not just the foreground
-    process: a pane running an HPC tool or a trainer that forks helpers would
-    otherwise under-report badly. Lists the heaviest processes so a blowup can
-    be attributed.
-
-    `session=` aggregates instead, as a table with a total. A job split across
-    panes — HPC tool in one, trainer in another — is only meaningful as a
-    session total, and that total is the number a human reads off the session
-    list; a per-pane view of it under-reports by design. `session='*'` gives
-    one row per session across the host. Unregistered panes are included:
-    memory does not care about registration.
-
-    For a threshold that notifies you instead of being polled, use watch_mem.
-    """
+    """Memory held now by a pane's whole process tree (host RSS and GPU), with its
+    heaviest processes. Give pane or session. For a job spread over panes, the
+    session total is the number that matters."""
+    if (pane is None) == (session is None):
+        raise ValueError("give exactly one of pane / session")
     if session is not None:
         snap = memmod.proc_snapshot()
         gpu_map = memmod.gpu_by_pid() if gpu else None
@@ -701,27 +529,20 @@ def mem_pane(
                 f"swap used {hm['swap_used']:.1f} GB") if hm else ""
         return table + host
 
-    targets = _resolve_panes(pane, panes)
+    require_pane(pane)
     snap = memmod.proc_snapshot()
     gpu_map = memmod.gpu_by_pid() if gpu else {}
-    out = []
-    for p in targets:
-        require_pane(p)
-        try:
-            root = memmod.pane_pid(p)
-        except Exception as e:
-            out.append(f"{p}: error ({e})")
-            continue
-        rss_kb, rss_rows = memmod.tree_rss(root, snap)
-        line = f"{p}: RSS {memmod.fmt_kb(rss_kb)}"
-        if gpu:
-            gpu_mib, gpu_rows = memmod.tree_gpu(root, snap, gpu_map)
-            if gpu_mib:
-                line += f" | GPU {gpu_mib / 1024:.2f} GB"
-        if rss_rows:
-            top = ", ".join(f"{c}({i}) {memmod.fmt_kb(v)}" for i, c, v in rss_rows[:3])
-            line += f"\n    top: {top}"
-        out.append(line)
+    root = memmod.pane_pid(pane)
+    rss_kb, rss_rows = memmod.tree_rss(root, snap)
+    line = f"{pane}: RSS {memmod.fmt_kb(rss_kb)}"
+    if gpu:
+        gpu_mib, gpu_rows = memmod.tree_gpu(root, snap, gpu_map)
+        if gpu_mib:
+            line += f" | GPU {gpu_mib / 1024:.2f} GB"
+    if rss_rows:
+        top = ", ".join(f"{c}({i}) {memmod.fmt_kb(v)}" for i, c, v in rss_rows[:3])
+        line += f"\n    top: {top}"
+    out = [line]
     hm = memmod.host_mem()
     if hm:
         out.append(f"host: {hm['available']:.0f} GB available of {hm['total']:.0f} GB, "
@@ -733,26 +554,15 @@ def mem_pane(
 @_plain_defaults
 def watch_mem(
     pane: str = None,
-    session: str = Field(None, description="watch a whole session's combined usage instead of one pane"),
-    rss_gb: float = Field(None, description="host RSS cap in GiB for the watched process trees"),
-    gpu_gb: float = Field(None, description="GPU memory cap in GiB for the same trees"),
+    session: str = Field(None, description="cap the session's combined usage"),
+    rss_gb: float = Field(None, description="host RSS cap in GiB"),
+    gpu_gb: float = Field(None, description="GPU memory cap in GiB"),
     poll: float = Field(30.0, description="seconds between checks"),
 ) -> str:
-    """Report on the event stream when a pane or session exceeds a memory cap.
-
-    Returns at once. The watch stays quiet under the cap and puts one report on
-    the event stream on the first breach: a per-pane table with the total and
-    the host's remaining memory. Then the watch ends.
-
-    Give exactly one of pane / session. Prefer `session` when a job spans
-    several panes: capping each pane separately measures the wrong thing, since
-    two panes at 6 GiB each pass a 10 GiB per-pane cap while the session sits
-    at 12 GiB. The table in the breach report attributes the total back to panes.
-
-    At least one of rss_gb / gpu_gb is required; give both to catch either kind
-    of blowup. It also reports '[gone]' if the watched trees end, so silence
-    never has to be interpreted as "still fine".
-    """
+    """Report [cap] on the event stream the first time a pane or session exceeds a
+    memory cap, or [gone] when its processes end. Returns at once. Give pane or
+    session and at least one cap. Cap the session when a job spans panes: two
+    panes at 6 GiB each pass a 10 GiB pane cap while the session holds 12 GiB."""
     if rss_gb is None and gpu_gb is None:
         raise ValueError("give rss_gb and/or gpu_gb")
     if (pane is None) == (session is None):
@@ -773,37 +583,24 @@ def watch_mem(
 def poll_pane(
     pane: str,
     pattern: str,
-    only_new: bool = Field(True, description="True (default): match only output produced AFTER this call (fingerprint snapshot taken NOW). False: also match pre-existing content — required after respawn_pane(cmd=) / create_session(cmd=) where the trigger ran before poll_pane."),
-    i: bool = Field(False, description="case insensitive match"),
-    F: bool = Field(False, description="literal string, not regex"),
+    only_new: bool = Field(True, description="match only output that appears after this call, so a match already on screen is missed. False after respawn_pane(cmd=) or create_session(cmd=), whose output may already be there."),
 ) -> str:
-    """Report on the event stream when a pattern first appears in a pane.
-
-    Returns at once. When the pattern first appears, '[match] <pane>: <line>'
-    is put on the event stream and the watch ends.
-
-    only_new=True (default): only matches output produced AFTER this call. The
-    fingerprint snapshot is taken NOW.
-    only_new=False: also matches pre-existing content.
-
-    For a multi-pane race, start one watch per pane.
-    """
+    """Report [match] on the event stream the first time a Python regex matches a
+    line in the pane. Returns at once. For output that arrives late or at an
+    unknown time. A prompt due within seconds is a prompt change: use read_after."""
     if not pattern:
         raise ValueError("pattern is required")
     require_pane(pane)
 
     fp_lines, fp_total = watch.build_fingerprint(pane) if only_new else ([], 0)
-    threading.Thread(target=watch.watch_pane, args=(pane, pattern, fp_lines, fp_total, only_new, i, F), daemon=True).start()
+    threading.Thread(target=watch.watch_pane, args=(pane, pattern, fp_lines, fp_total, only_new), daemon=True).start()
     return f"[watching] {pane} for /{pattern}/; [match] arrives on the event stream." + events.waiter_note()
 
 
 @mcp.tool()
 def wait_events(ctx: Context) -> str:
-    """Return this session's event script and client-specific waiting instructions.
-
-    Follow the returned waiting instructions, selected for the connected client.
-    Reuse the process after handling each event; nothing is registered per task.
-    """
+    """This session's event script and how to wait on it in this client. Start it
+    once per connection and keep it for every later event."""
     path = events.write_script()
     if events.waiter_alive():
         return f"[running] the event stream is already being watched; do not start it again.\nscript: {path}"
@@ -822,7 +619,7 @@ def wait_events(ctx: Context) -> str:
 @mcp.tool()
 @_plain_defaults
 def task_list(all: bool = False) -> str:
-    """List background tasks. By default shows running only."""
+    """Tracked tasks with status and next step. Running ones only unless all=True."""
     if not tasks._tasks:
         return "No tasks"
 
@@ -854,28 +651,11 @@ def task_list(all: bool = False) -> str:
 @mcp.tool()
 @_plain_defaults
 def task_cancel(task_id: str) -> str:
-    """Remove task tracking. Does NOT stop the running process."""
+    """Stop tracking a task. Its command keeps running: send C-c first to stop it."""
     task = _get_task(task_id)
     tasks.finalize_task(task)
     tasks._tasks.pop(task_id, None)
     return f"Task {task_id} removed"
-
-
-@mcp.tool()
-@_plain_defaults
-def task_cancel_all() -> str:
-    """Remove all task tracking. Does NOT stop running processes."""
-    if not tasks._tasks:
-        return "No tasks to cancel"
-
-    count = len(tasks._tasks)
-    for task_id in list(tasks._tasks.keys()):
-        task = tasks._tasks.get(task_id)
-        if task:
-            tasks.finalize_task(task)
-            tasks._tasks.pop(task_id, None)
-
-    return f"Cancelled {count} task(s)"
 
 
 # =============================================================================
@@ -1013,13 +793,8 @@ def _ls_detailed(pane_data: list[tuple], sessions_meta: dict) -> list[str]:
 @mcp.tool()
 @_plain_defaults
 def ls(session: str = None, window: str = None) -> str:
-    """List tmux sessions/windows/panes as a tree.
-
-    Without session: compact summary (session name, status, window count).
-    With session: detailed tree with PID, process, cwd.
-
-    For memory (host RSS and GPU) use mem_pane: it sums a pane's whole process
-    tree, which is what actually matters, rather than annotating one pid."""
+    """List tmux sessions with status and owner. With session: its windows and panes
+    with PID, process, cwd and registration."""
     if window and not session:
         raise ValueError("'window' requires 'session'")
 
@@ -1050,8 +825,10 @@ def ls(session: str = None, window: str = None) -> str:
 
 @mcp.tool()
 @_plain_defaults
-def create_session(name: str, windows: list[str] = None, start_dir: str = None, cmd: str = None, cmds: list[str] = None) -> str:
-    """Create a new tmux session (managed). Auto-registers all panes."""
+def create_session(name: str, windows: list[str] = None, start_dir: str = None,
+                   cmd: str = Field(None, description="command each window starts with")) -> str:
+    """Create a session you own, one window per name (default "main"), and register
+    its panes as <name>:<window>.0."""
     if check_session(name):
         raise ValueError(
             f"Session '{name}' already exists.\n\n"
@@ -1061,23 +838,19 @@ def create_session(name: str, windows: list[str] = None, start_dir: str = None, 
     if windows is None:
         windows = ["main"]
 
-    _validate_multi(cmd, cmds, "cmds", windows)
-
-    w_cmd = cmds[0] if cmds else cmd
     args = ["new-session", "-d", "-s", name, "-n", windows[0]]
     if start_dir:
         args.extend(["-c", os.path.expanduser(start_dir)])
-    if w_cmd:
-        args.append(tmux.wrap_cmd(w_cmd))
+    if cmd:
+        args.append(tmux.wrap_cmd(cmd))
     subprocess.run(tmux.build_tmux_command(args), capture_output=True)
 
-    for wi, w_name in enumerate(windows[1:], 1):
-        w_cmd = cmds[wi] if cmds else cmd
+    for w_name in windows[1:]:
         w_args = ["new-window", "-t", name, "-n", w_name]
         if start_dir:
             w_args.extend(["-c", os.path.expanduser(start_dir)])
-        if w_cmd:
-            w_args.append(tmux.wrap_cmd(w_cmd))
+        if cmd:
+            w_args.append(tmux.wrap_cmd(cmd))
         subprocess.run(tmux.build_tmux_command(w_args), capture_output=True)
 
     # The existence check above cached this session as absent (2s TTL) —
@@ -1100,11 +873,8 @@ def create_session(name: str, windows: list[str] = None, start_dir: str = None, 
 
 @mcp.tool()
 @_plain_defaults
-def kill_session(name: str, force: bool = Field(False, description="force kill external (non-managed) session")) -> str:
-    """Kill a tmux session.
-
-    Managed sessions (created by MCP) are killed immediately.
-    External sessions require force=True (user confirmation via Claude Code)."""
+def kill_session(name: str, force: bool = Field(False, description="required for a session you did not create")) -> str:
+    """Kill a session."""
     if not check_session(name):
         raise ValueError(f"Session '{name}' does not exist")
 
@@ -1121,7 +891,7 @@ def kill_session(name: str, force: bool = Field(False, description="force kill e
 @mcp.tool()
 @_plain_defaults
 def create_window(session: str, name: str, start_dir: str = None, cmd: str = None) -> str:
-    """Create a window in a managed session. Do NOT add windows to user's external sessions — use create_session instead."""
+    """Add a window to a session you created, and register its pane."""
     if not check_session(session):
         raise ValueError(f"Session '{session}' does not exist")
 
@@ -1152,9 +922,8 @@ def create_window(session: str, name: str, start_dir: str = None, cmd: str = Non
 
 @mcp.tool()
 @_plain_defaults
-def kill_window(session: str, window: str, force: bool = Field(False, description="force kill external (non-managed) window")) -> str:
-    """Kill a window. Killing the last window destroys the session — use create_session to recreate.
-    Managed windows are killed immediately. External windows require force=True."""
+def kill_window(session: str, window: str, force: bool = Field(False, description="required for a window you did not create")) -> str:
+    """Kill a window. Killing the last one ends the session."""
     if not check_session(session):
         raise ValueError(f"Session '{session}' does not exist")
 
@@ -1172,7 +941,8 @@ def kill_window(session: str, window: str, force: bool = Field(False, descriptio
 @mcp.tool()
 @_plain_defaults
 def set_pane(pane: str, description: str) -> str:
-    """Register a pane for use. Re-calling updates description."""
+    """Register an existing pane (session:window.index) for the other tools. Calling
+    again updates its description."""
     try:
         tmux.parse_pane_id(pane)
     except ValueError:
@@ -1187,17 +957,11 @@ def set_pane(pane: str, description: str) -> str:
 
 @mcp.tool()
 @_plain_defaults
-def remove_pane(pane: str) -> str:
-    """Unregister a pane."""
-    if pane not in registry._working_panes:
-        raise ValueError(f"Pane '{pane}' is not registered")
-
-    del registry._working_panes[pane]
-    return f"Removed: {pane}"
-
-
-def _respawn_single(pane: str, start_dir: str = None, cmd: str = None) -> str:
-    """Respawn a single registered pane. Returns status string."""
+def respawn_pane(pane: str, start_dir: str = None,
+                 cmd: str = Field(None, description="command to start instead of bash")) -> str:
+    """Kill the pane's process and start a fresh shell. Clears its tasks and keeps its
+    registration."""
+    check_pane_registered(pane)
     try:
         run_tmux_cmd(["list-panes", "-t", pane], raise_on_error=True)
     except RuntimeError as e:
@@ -1216,140 +980,51 @@ def _respawn_single(pane: str, start_dir: str = None, cmd: str = None) -> str:
     return "\n".join(parts)
 
 
-@mcp.tool()
-@_plain_defaults
-def respawn_pane(pane: str = None, panes: list[str] = None, start_dir: str = None, cmd: str = None, cmds: list[str] = None) -> str:
-    """Kill the running process in a pane and start a fresh shell.
-    Cleans up associated tasks and locks. Registration (description/owner) is preserved."""
-    multi = _resolve_panes(pane, panes)
-    _validate_multi(cmd, cmds, "cmds", multi)
-    if multi is not None:
-        results = {p: _respawn_single(p, start_dir, cmds[i] if cmds else cmd) for i, p in enumerate(multi)}
-        return _format_multi_result(results)
-    check_pane_registered(pane)
-    return _respawn_single(pane, start_dir, cmd)
-
-
 # =============================================================================
 # Raw input / capture tools
 # =============================================================================
 
-def _map_panes(target_panes: list[str], fn) -> str:
-    """Apply fn to each pane (skipping missing ones) and format grouped result."""
-    results = {}
-    for p in target_panes:
-        results[p] = fn(p) if check_session(p) else "not found (skipped)"
-    return _format_multi_result(results)
-
-
 @mcp.tool()
 @_plain_defaults
-def send_text(pane: str = None, text: str = "", enter: bool = Field(True, description="press Enter after text"), panes: list[str] = None) -> str:
-    """Send text string to pane(s). For commands, passwords, etc."""
+def send_text(pane: str, text: str, enter: bool = Field(True, description="press Enter after the text")) -> str:
+    """Type text into a pane, such as an answer to a password or yes/no prompt."""
     check_deny(text, "send_text")
-    target_panes = _resolve_panes(pane, panes)
-
-    def send(p):
-        run_tmux_cmd(["send-keys", "-t", p, text], capture=False)
-        if enter:
-            run_tmux_cmd(["send-keys", "-t", p, "Enter"], capture=False)
-        return "sent"
-
-    if target_panes is not None:
-        return _map_panes(target_panes, send)
-
     require_pane(pane)
-    send(pane)
+    run_tmux_cmd(["send-keys", "-t", pane, text], capture=False)
+    if enter:
+        run_tmux_cmd(["send-keys", "-t", pane, "Enter"], capture=False)
     return "Text sent"
 
 
 @mcp.tool()
 @_plain_defaults
-def send_keys(pane: str = None, keys: str = "", enter: bool = Field(False, description="press Enter after keys"), panes: list[str] = None) -> str:
-    """Send special keys to pane(s). For C-c, Enter, Escape, arrow keys, etc."""
-    target_panes = _resolve_panes(pane, panes)
-
-    def send(p):
-        for key in keys.split():
-            run_tmux_cmd(["send-keys", "-t", p, key], capture=False)
-        if enter:
-            run_tmux_cmd(["send-keys", "-t", p, "Enter"], capture=False)
-        return "sent"
-
-    if target_panes is not None:
-        return _map_panes(target_panes, send)
-
+def send_keys(pane: str, keys: str, enter: bool = Field(False, description="press Enter after the keys")) -> str:
+    """Send tmux key names separated by spaces, such as C-c, Escape, Up or Enter."""
     require_pane(pane)
-    send(pane)
+    for key in keys.split():
+        run_tmux_cmd(["send-keys", "-t", pane, key], capture=False)
+    if enter:
+        run_tmux_cmd(["send-keys", "-t", pane, "Enter"], capture=False)
     return "Keys sent"
-
-
-def _capture_single_pane(p: str, tail: int, rel_range: str, since_marker: str, filter_kwargs: dict) -> str:
-    """Capture and filter a single pane."""
-    if since_marker:
-        # Marker could be far back — use progressive capture
-        raw = tmux.capture_until(p, lambda r: since_marker in r)
-        lines = tmux.split_capture(raw)
-        marker_idx = None
-        for idx, line in enumerate(lines):
-            if since_marker in line:
-                marker_idx = idx
-        all_lines = lines[marker_idx + 1:] if marker_idx is not None else lines
-    else:
-        # No marker — tail-based capture is sufficient
-        n_capture = max(tail, 100) if tail > 0 else 100
-        if rel_range:
-            start_off, end_off = parse_rel_range(rel_range)
-            n_capture = max(abs(start_off) + 50, n_capture)
-        raw = run_tmux_cmd(["capture-pane", "-t", p, "-p", "-J", "-S", f"-{n_capture}"])
-        all_lines = tmux.split_capture(raw)
-
-    if rel_range:
-        start, end = parse_rel_range(rel_range)
-        all_lines = all_lines[start:end]
-    else:
-        if tail > 0 and len(all_lines) > tail:
-            all_lines = all_lines[-tail:]
-
-    return apply_output_filters(all_lines, n_negative=True, **filter_kwargs)
 
 
 @mcp.tool()
 @_plain_defaults
 def capture_pane(
-    pane: str = None,
-    tail: int = Field(5, description="lines from end (grep searches within this)"),
-    rel_range: str = Field(None, description="relative range from end, e.g. '100:50'"),
-    grep: str = Field(None, description="filter within tail range, does NOT expand it"),
-    v: str = Field(None, description="exclude matching (grep -v)"),
-    i: bool = Field(False, description="case insensitive (grep -i)"),
-    w: bool = Field(False, description="whole word match (grep -w)"),
-    F: bool = Field(False, description="literal string, not regex (grep -F)"),
-    m: int = Field(None, description="max matching lines (grep -m)"),
-    A: int = Field(None, description="lines after match (grep -A)"),
-    B: int = Field(None, description="lines before match (grep -B)"),
-    C: int = Field(None, description="context lines around match (grep -C)"),
-    since_marker: str = Field(None, description="only capture after this marker"),
-    uniq: bool = True,
-    n: bool = Field(False, description="show line numbers (grep -n)"),
-    strip_tqdm: bool = Field(False, description="remove tqdm lines, keep last group"),
-    save: str = None,
-    append: bool = True,
-    prefix: str = None,
-    suffix: str = None,
-    panes: list[str] = None
+    pane: str,
+    tail: int = Field(5, description="lines from the end. grep searches only these."),
+    grep: str = Field(None, description=_GREP),
+    C: int = Field(0, description=_CONTEXT),
 ) -> str:
-    """Capture pane content. tail= sets capture range, grep= filters within it."""
-    target_panes = _resolve_panes(pane, panes)
-    fkw = dict(grep=grep, v=v, i=i, w=w, F=F, m=m, A=A, B=B, C=C, n=n,
-               uniq=uniq, save=save, append=append, prefix=prefix, suffix=suffix,
-               strip_tqdm=strip_tqdm)
-
-    if target_panes is not None:
-        return _map_panes(target_panes, lambda p: _capture_single_pane(p, tail, rel_range, since_marker, fkw))
-
+    """Read the pane's screen. Use it the first time you use a pane and after C-c.
+    Follow a task with task_output instead."""
     require_pane(pane)
-    return _capture_single_pane(pane, tail, rel_range, since_marker, fkw)
+    n_capture = max(tail, 100) if tail > 0 else 100
+    raw = run_tmux_cmd(["capture-pane", "-t", pane, "-p", "-J", "-S", f"-{n_capture}"])
+    all_lines = tmux.split_capture(raw)
+    if tail > 0 and len(all_lines) > tail:
+        all_lines = all_lines[-tail:]
+    return apply_output_filters(all_lines, grep, C)
 
 
 def main():

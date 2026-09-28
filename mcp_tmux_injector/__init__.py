@@ -31,7 +31,7 @@ Module layout:
    config.py     deny-list, instructions, shared paths
    tmux.py       tmux primitives (run, capture, sessions/windows)
    codec.py      markers, code delivery (keystroke-only, ssh-safe), extraction
-   filters.py    output filtering (tqdm/grep/dedupe/save)
+   filters.py    output filtering (grep with context, dedupe)
    tasks.py      background task registry, pane locks
    registry.py   pane/session registration, ownership, cleanup
    events.py     the session's event stream + waiter script
