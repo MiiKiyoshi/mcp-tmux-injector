@@ -96,7 +96,7 @@ def watch_mem(pane: str | None, session: str | None, rss_gb: float | None,
     is worth knowing about promptly, and each check is a single `ps` sweep.
 
     Session scope exists because a cap on one pane measures the wrong thing
-    whenever a job spans several: a fold running Solver in one pane and the
+    whenever a job spans several: a job running a solver in one pane and a
     trainer in another sat at 6.4 + 4.2 GiB and never tripped a 10 GB per-pane
     cap, while the number a human reads off the session was 10.6 GiB. The
     breach report is a per-pane table so the total is immediately attributable.

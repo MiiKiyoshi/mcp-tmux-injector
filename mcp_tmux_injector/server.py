@@ -352,7 +352,7 @@ async def xtcl(
     tail: int = Field(0, description=_TAIL),
     force: bool = Field(False, description=_FORCE),
 ) -> str:
-    """Run TCL in a pane (TCL tool and other TCL tools)."""
+    """Run TCL in a pane's TCL interpreter."""
     return await _exec_tool("tcl", send_tcl_code, pane, code, timeout, read_after, tail, force)
 
 

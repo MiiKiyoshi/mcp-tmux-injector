@@ -1,6 +1,6 @@
 """
 MCP Server for tmux command injection (xpy/xtcl/xsh functionality)
-Sends commands to Python REPL, TCL-based HPC tools, or shell running in tmux panes.
+Sends commands to a Python REPL, a TCL interpreter, or a shell running in tmux panes.
 Supports both blocking and non-blocking (background) execution.
 
 IMPORTANT: Panes must be registered before use with set_pane().
@@ -8,7 +8,7 @@ IMPORTANT: Panes must be registered before use with set_pane().
 USAGE PATTERNS:
 
 0. Register pane first (REQUIRED):
-   set_pane("t1:1.0", "TCL tool Python REPL")
+   set_pane("t1:1.0", "Python REPL")
    ls()  # Check sessions and registered panes
 
 1. Shell commands (bash pane):
@@ -19,10 +19,10 @@ USAGE PATTERNS:
    xpy(pane, "print(1+1)")              # Run Python code
    xpy(pane, "exit()", read_after=1)    # Exit Python
 
-3. TCL tool/TCL (enter and exit):
-   xsh(pane, "tclsh", read_after=2)  # Start TCL tool
+3. TCL (enter and exit):
+   xsh(pane, "tclsh", read_after=2)     # Start tclsh
    xtcl(pane, "puts hello")             # Run TCL code
-   xtcl(pane, "exit", read_after=1)     # Exit TCL tool
+   xtcl(pane, "exit", read_after=1)     # Exit tclsh
 
 4. Interrupt/kill running process:
    send_keys(pane, "C-c C-c C-c")   # Send Ctrl+C multiple times

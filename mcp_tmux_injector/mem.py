@@ -2,7 +2,7 @@
 
 A tmux pane owns a process tree: the pane's shell, whatever it launched, and
 that program's children. `ps` alone reports single processes, so a pane running
-an HPC tool or a trainer that forks helpers under-reports badly. These helpers
+a simulator or a trainer that forks helpers under-reports badly. These helpers
 walk the tree from the pane's shell pid and sum both RSS and GPU memory across
 it — a pane can blow up on either one, and which one it is decides what you do
 about it.
@@ -85,7 +85,7 @@ def pss_kb(pid: int, fallback: int) -> int:
 
     RSS counts a shared page in full for every process mapping it, so summing
     RSS across a tree over-reports whenever a program forks workers. Measured
-    on a live HPC tool: an Solver parent plus one forked child read 20.0 GiB
+    on a live tool: a parent process plus one forked child read 20.0 GiB
     by RSS and 2.1 GiB by PSS. A per-tree total has to use PSS or it is fiction.
 
     Falls back to the caller's RSS when smaps_rollup cannot be read (process

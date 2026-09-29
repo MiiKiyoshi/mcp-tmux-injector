@@ -2,7 +2,7 @@
 
 # mcp-tmux-injector
 
-Let Claude Code or Codex run shell, Python, and TCL tools such as TCL tool in tmux panes you can watch, and hear when a long job ends.
+Let Claude Code or Codex run shell commands, Python, and TCL in tmux panes you can watch, and hear when a long job ends.
 
 ![A training script run through mcp-tmux-injector. Left, the agent's tool calls and the [done] event from a real session, redrawn as text. Right, the tmux pane they ran in, as captured.](docs/hero.png)
 

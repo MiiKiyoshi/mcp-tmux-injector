@@ -5,11 +5,11 @@ build-backend = "hatchling.build"
 [project]
 name = "mcp-tmux-injector"
 version = "0.1.0"
-description = "MCP server for injecting commands into tmux sessions (Python REPL, TCL/TCL tool, Shell)"
+description = "MCP server for injecting commands into tmux sessions (Python REPL, TCL, shell)"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
-keywords = ["mcp", "tmux", "claude", "automation", "hpc", "tclsh"]
+keywords = ["mcp", "tmux", "claude", "codex", "automation"]
 authors = [
     { name = "Kiyoshi" }
 ]
