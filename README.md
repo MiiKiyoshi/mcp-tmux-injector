@@ -4,7 +4,7 @@
 
 Let Claude Code or Codex run shell commands, Python, and TCL in tmux panes you can watch, and hear when a long job ends.
 
-If it helps your terminal work, a star is very welcome.
+> ⭐ **If this helps your terminal work, please give it a star.** It helps others find the project.
 
 ![A training script run through mcp-tmux-injector. Left, the agent's tool calls and the [done] event from a real session, redrawn as text. Right, the tmux pane they ran in, as captured.](docs/hero.png)
 
