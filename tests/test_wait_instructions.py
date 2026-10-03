@@ -53,9 +53,13 @@ def test_wait_events_selects_client_instructions(monkeypatch):
         assert ("codex queue" in text) == (name == "codex-mcp-client")
         assert ('sandbox_permissions="require_escalated"' in text) == (name == "codex-mcp-client")
         assert "task_output(task_id)" in text
+        # A Monitor expiry is restarted only while the work still needs events.
+        assert ("restart the same Monitor only if that work still needs events" in text) == (name == "claude-code")
+        assert "only while your tmux work still needs events. Otherwise stop it." in text
     tool = next(t for t in asyncio.run(server.mcp.list_tools()) if t.name == "wait_events")
     assert "ctx" not in tool.inputSchema["properties"]
-    for needed in ("every new", "exactly once", "Do not poll", "Unread events"):
+    for needed in ("when your tmux work needs events", "each new MCP connection or restart",
+                   "then stop it", "Do not poll", "Unread events stay queued"):
         assert needed in server.mcp.instructions, needed
 
 

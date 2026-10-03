@@ -31,10 +31,14 @@ def _wait_method(ctx: Context) -> str:
     name = ctx.session.client_params.clientInfo.name.casefold()
     if "claude" in name:
         return (
+            "Use this waiter while the review or task it serves remains part of your work, "
+            "including edits requested in chat and pending review. "
             'Run the script with Monitor(command=<script>, description="tmux-injector events", '
-            "timeout_ms=1800000), then end the turn. Keep the monitor for subsequent events. "
-            "Monitor stops after 30 minutes: when it reports that, start it again with the same script "
-            "and end the turn without a reply."
+            "timeout_ms=1800000), then end the turn. On a 30-minute expiry notice, restart the same "
+            "Monitor only if that work still needs events, then end the turn without a reply. "
+            "Otherwise leave it stopped and end the turn without a reply. Stop an active Monitor "
+            "when that work no longer needs events. Judge from the work, not event inactivity or "
+            "an explicit stop request."
         )
     if "codex" in name:
         return (
@@ -45,14 +49,16 @@ def _wait_method(ctx: Context) -> str:
             "The script uses codex queue to deliver events as labeled user messages, "
             "including while idle. Delivery may take about 10 seconds. "
             "Requires codex queue on PATH and CODEX_THREAD_ID in the agent shell. "
-            "Keep one waiter; stop its process when no longer needed."
+            "Keep one waiter while the review or task it serves still needs events. "
+            "Stop its process when that work no longer needs events."
         )
     return (
         "Run the script with your shell tool and read its output. If the tool returns a "
         "running session, retain it and use the tool that reads subsequent output. Keep "
         "the turn active while waiting unless your client explicitly supports resuming "
         "a completed turn from background output. After handling an event, resume "
-        "waiting on the same process."
+        "waiting on the same process only while the review or task it serves still needs "
+        "events. Otherwise stop it."
     )
 
 
@@ -506,8 +512,9 @@ def poll_pane(
 
 @mcp.tool()
 def wait_events(ctx: Context) -> str:
-    """This session's event script and how to wait on it in this client. Start it
-    once per connection and keep it for every later event."""
+    """This connection's event script and how to wait on it in this client. Start one
+    process when your tmux work needs events, reuse it while that work still needs
+    events, and stop it when it does not."""
     path = events.write_script()
     if events.waiter_alive():
         return f"[running] the event stream is already being watched; do not start it again.\nscript: {path}"
@@ -517,8 +524,9 @@ def wait_events(ctx: Context) -> str:
         f"script: {path}\n"
         f"{_wait_method(ctx)}{note}\n"
         "On [done], read task_output(task_id); handle other events as reported. "
-        "Do not resend the task command. Resume waiting on the same process after handling "
-        "events. Start another copy only after the previous process has ended. If the stream "
+        "Do not resend the task command. After handling events, resume waiting on the same "
+        "process only while your tmux work still needs events. Otherwise stop it. Start another "
+        "copy only when those events are needed and the previous process has ended. If the stream "
         "reports that the server exited, call wait_events() on the new server for its script.\n"
     )
 
