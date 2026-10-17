@@ -48,7 +48,7 @@ def check_pane_registered(pane: str) -> None:
 
 No panes registered.
 
-Context may have been lost due to compaction.
+Registrations live in this server process, so a server restart (such as an MCP reconnect) clears them.
 Ask user for permission before registering with set_pane()."""
         raise ValueError(msg)
 
