@@ -100,7 +100,7 @@ def waiter_note() -> str:
     """One line to append to a reply that promised an event, when nobody is listening."""
     if waiter_alive():
         return ""
-    return "\nNo event stream is running: call wait_events() and start its script."
+    return "\nNo event stream is running: call listen() and start its script."
 
 
 def write_script() -> str:
@@ -110,7 +110,7 @@ def write_script() -> str:
 # tmux-injector event stream for server pid {PID}.
 # Prints each event as it lands ([done] task, [match] pattern, [cap] memory, [error])
 # and keeps waiting for the next. Start it once using the client-specific instructions
-# returned by wait_events(). `--once` prints the next batch and exits,
+# returned by listen(). `--once` prints the next batch and exits,
 # for a client whose shell tool can only block.
 thread=
 if [ "${{1-}}" = "--codex" ]; then
@@ -143,7 +143,7 @@ while :; do
     continue
   fi
   if ! kill -0 {PID} 2>/dev/null; then
-    deliver "[gone] tmux-injector server (pid {PID}) exited; its tasks are gone. Call wait_events() again for the new server."
+    deliver "[gone] tmux-injector server (pid {PID}) exited; its tasks are gone. Call listen() again for the new server."
     exit 0
   fi
   timeout 60 {tmux} wait-for {CHANNEL} >/dev/null 2>&1

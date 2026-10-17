@@ -26,7 +26,7 @@ def test_check_lists_the_tools_without_starting(monkeypatch, capsys):
     monkeypatch.setattr(server.sys, "argv", ["mcp-tmux-injector", "--check"])
     server.main()
     names = capsys.readouterr().out.split()
-    assert len(names) == 20 and {"xsh", "wait_events", "capture_pane"} <= set(names)
+    assert len(names) == 20 and {"xsh", "listen", "capture_pane"} <= set(names)
 
 
 def test_unknown_arguments_are_rejected():

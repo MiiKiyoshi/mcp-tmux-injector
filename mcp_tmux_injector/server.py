@@ -521,7 +521,7 @@ def poll_pane(
 
 
 @mcp.tool()
-def wait_events(ctx: Context) -> str:
+def listen(ctx: Context) -> str:
     """This connection's event script and how to wait on it in this client. Start one
     process when your tmux work needs events, reuse it while that work still needs
     events, and stop it when it does not."""
@@ -537,7 +537,7 @@ def wait_events(ctx: Context) -> str:
         "Do not resend the task command. After handling events, resume waiting on the same "
         "process only while your tmux work still needs events. Otherwise stop it. Start another "
         "copy only when those events are needed and the previous process has ended. If the stream "
-        "reports that the server exited, call wait_events() on the new server for its script.\n"
+        "reports that the server exited, call listen() on the new server for its script.\n"
     )
 
 

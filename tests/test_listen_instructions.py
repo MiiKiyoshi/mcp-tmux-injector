@@ -35,7 +35,7 @@ def test_restart_carries_only_unread_events_from_dead_servers(tmp_path, monkeypa
     assert events.ACK_FILE.read_text() == "2\n"
 
 
-def test_wait_events_selects_client_instructions(monkeypatch):
+def test_listen_selects_client_instructions(monkeypatch):
     monkeypatch.setattr(server.events, "write_script", lambda: "/example/events.sh")
     monkeypatch.setattr(server.events, "waiter_alive", lambda: False)
     monkeypatch.setattr(server.events, "unread", lambda: 0)
@@ -44,7 +44,7 @@ def test_wait_events_selects_client_instructions(monkeypatch):
     monkeypatch.setattr(server.mcp, "get_context", lambda: context)
     for name in ("claude-code", "codex-mcp-client", "other-client"):
         context.session.client_params.clientInfo.name = name
-        result = asyncio.run(server.mcp.call_tool("wait_events", {}))
+        result = asyncio.run(server.mcp.call_tool("listen", {}))
         text = result[0][0].text
         assert ("Monitor" in text) == (name == "claude-code")
         # Claude Code's Monitor takes command, description and timeout_ms (at most 30 minutes).
@@ -56,7 +56,7 @@ def test_wait_events_selects_client_instructions(monkeypatch):
         # A Monitor expiry is restarted only while the work still needs events.
         assert ("restart the same Monitor only if that work still needs events" in text) == (name == "claude-code")
         assert "only while your tmux work still needs events. Otherwise stop it." in text
-    tool = next(t for t in asyncio.run(server.mcp.list_tools()) if t.name == "wait_events")
+    tool = next(t for t in asyncio.run(server.mcp.list_tools()) if t.name == "listen")
     assert "ctx" not in tool.inputSchema["properties"]
     for needed in ("when your tmux work needs events", "each new MCP connection or restart",
                    "then stop it", "Do not poll", "Unread events stay queued"):
