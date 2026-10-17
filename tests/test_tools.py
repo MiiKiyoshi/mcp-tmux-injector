@@ -3,12 +3,14 @@ are never touched. Event files go to tmp_path."""
 import asyncio
 import shutil
 import subprocess
+import tempfile
 import time
 
 import pytest
 from mcp.server.fastmcp.exceptions import ToolError
 
 from mcp_tmux_injector import events, registry, server, tasks, tmux
+from mcp_tmux_injector.codec import SCROLLBACK_LOST
 
 pytestmark = pytest.mark.skipif(shutil.which("tmux") is None, reason="needs tmux")
 
@@ -43,7 +45,9 @@ def _clear_state():
 @pytest.fixture
 def stream(tmp_path, monkeypatch):
     """A managed session 'work' with windows a and b. Returns a reader of the event stream."""
-    sock = str(tmp_path / "tmux.sock")
+    # pytest's tmp_path is too long for a unix socket on macOS (104 bytes).
+    sock_dir = tempfile.mkdtemp(prefix="tmi", dir="/tmp")
+    sock = f"{sock_dir}/tmux.sock"
     monkeypatch.setattr(tmux, "TMUX_SOCKET_PATH", sock)
     monkeypatch.setattr(events, "TMUX_SOCKET_PATH", sock)
     monkeypatch.setattr(events, "EVENT_DIR", tmp_path)
@@ -54,6 +58,7 @@ def stream(tmp_path, monkeypatch):
     call("create_session", name="work", windows=["a", "b"])
     yield lambda: events.EVENT_FILE.read_text() if events.EVENT_FILE.exists() else ""
     subprocess.run(["tmux", "-S", sock, "kill-server"], capture_output=True)
+    shutil.rmtree(sock_dir, ignore_errors=True)
     _clear_state()
 
 
@@ -65,6 +70,24 @@ def test_run_promote_and_read_back(stream):
     assert wait_for(lambda: f"[done] {task_id}" in stream())
     assert task_id in call("task_list", all=True)
     assert call("task_output", task_id=task_id) == "slept"
+
+
+def test_output_survives_a_clear(stream):
+    # What `clear` sends where terminfo has E3: the screen goes to the
+    # history, then the history goes, begin marker included.
+    out = call("xsh", pane=A, code="printf '\\033[H\\033[2J\\033[3J'; echo after")
+    assert out == f"{SCROLLBACK_LOST}\nafter"
+
+
+def test_registrations_survive_a_server_restart(stream, tmp_path, monkeypatch):
+    monkeypatch.setattr(registry, "REGISTRY_DIR", tmp_path / "registry")
+    monkeypatch.setattr(registry, "_registry_file", None)
+    registry.init()
+    call("create_session", name="mine")
+    _clear_state()  # the server restarts under the same client
+    registry.init()
+    assert call("xsh", pane=A, code="echo a") == "a"
+    assert call("kill_session", name="mine") == "Killed session 'mine'"
 
 
 def test_long_output_is_kept_as_a_task(stream):

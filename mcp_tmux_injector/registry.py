@@ -1,5 +1,9 @@
 """Session/window/pane registries, ownership, and resource cleanup."""
+import json
+import os
+import subprocess
 import time
+from pathlib import Path
 
 from . import tasks
 from .tmux import check_session, list_windows, parse_pane_id
@@ -13,6 +17,62 @@ _sessions: dict[str, dict] = {}
 
 # Registered working panes: pane -> {description, owner}
 _working_panes: dict[str, dict] = {}
+
+# Both registries are kept in a file named for the MCP client process, so a
+# server restart under the same client (an MCP reconnect) finds them again.
+REGISTRY_DIR = Path.home() / ".cache" / "mcp-tmux-injector" / "registry"
+_registry_file: Path | None = None
+
+
+def _process(pid: int) -> tuple[int, str, str]:
+    """(ppid, start time, command name) of a live process."""
+    out = subprocess.run(["ps", "-o", "ppid=,lstart=,comm=", "-p", str(pid)],
+                         capture_output=True, text=True, check=True,
+                         env={**os.environ, "LC_ALL": "C"}).stdout.split()
+    return int(out[0]), "_".join(out[1:6]), os.path.basename(out[6])
+
+
+def _client_key() -> str:
+    """pid and start time of the client: the first ancestor that is not the
+    uv launcher or this server's python. The start time tells a reused pid apart."""
+    pid = os.getppid()
+    while True:
+        ppid, start, comm = _process(pid)
+        if comm not in ("uv", "uvx") and not comm.startswith("python"):
+            return f"{pid}-{start}".replace(":", "")
+        pid = ppid
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def init() -> None:
+    """Load the registries this client's earlier server left, and drop the files
+    of clients that have exited."""
+    global _registry_file
+    REGISTRY_DIR.mkdir(parents=True, exist_ok=True)
+    for f in REGISTRY_DIR.glob("*.json"):
+        if not _alive(int(f.name.split("-", 1)[0])):
+            f.unlink(missing_ok=True)
+    _registry_file = REGISTRY_DIR / f"{_client_key()}.json"
+    if _registry_file.exists():
+        saved = json.loads(_registry_file.read_text())
+        _sessions.update(saved["sessions"])
+        _working_panes.update(saved["panes"])
+
+
+def save() -> None:
+    """Write both registries. Without init (tests, --check) there is no file."""
+    if _registry_file is None:
+        return
+    tmp = _registry_file.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"sessions": _sessions, "panes": _working_panes}))
+    tmp.replace(_registry_file)
 
 
 def get_registered_panes_message() -> str:
@@ -48,7 +108,7 @@ def check_pane_registered(pane: str) -> None:
 
 No panes registered.
 
-Registrations live in this server process, so a server restart (such as an MCP reconnect) clears them.
+Registrations last while this MCP client runs, across server restarts; a new client starts with none.
 Ask user for permission before registering with set_pane()."""
         raise ValueError(msg)
 

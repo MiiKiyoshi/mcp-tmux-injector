@@ -1,6 +1,8 @@
 """Pure-function tests: tmux commands, markers, filters, fingerprints. No tmux needed."""
-from mcp_tmux_injector import tmux
-from mcp_tmux_injector.codec import extract_output, generate_marker, generate_task_id_and_marker
+import asyncio
+
+from mcp_tmux_injector import server, tmux
+from mcp_tmux_injector.codec import SCROLLBACK_LOST, extract_output, generate_marker, generate_task_id_and_marker
 from mcp_tmux_injector.filters import apply_dedupe, apply_output_filters
 from mcp_tmux_injector.server import _output_lines
 from mcp_tmux_injector.tasks import cmd_display
@@ -23,6 +25,18 @@ def test_markers_and_extraction():
     assert extract_output(f"{b}\npartial output", b, e) == ("partial output", False)
     # An echoed command line that merely contains the marker is not the marker.
     assert extract_output(f"echoed cmd containing {b} inline\n{b}\nx\n{e}", b, e) == ("x", True)
+    # `clear` erased the scrollback and the begin marker with it.
+    assert extract_output(f"\nout\n\n{e}\nprompt$", b, e) == (f"{SCROLLBACK_LOST}\nout\n", True)
+
+
+def test_read_after_finds_a_marker_behind_typed_ahead_code(monkeypatch):
+    sent = {}
+    monkeypatch.setattr(server, "send_plain", lambda p, code, lang, begin: sent.update(begin=begin))
+    monkeypatch.setattr(server.tasks, "BLOCKING_TIMEOUT_MAX", 0)
+    # The tty echoed `ssh host` before the marker printed.
+    monkeypatch.setattr(tmux, "capture_until", lambda p, found: (
+        f"$ echo '{sent['begin']}'\nssh host{sent['begin']}\nWelcome\nhost$"))
+    assert asyncio.run(server._read_after_on_pane("s:w.0", "ssh host", "shell", 1, 0)) == "Welcome\nhost$"
 
 
 def test_output_lines_drop_only_the_final_newline():

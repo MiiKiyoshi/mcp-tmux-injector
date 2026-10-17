@@ -99,6 +99,7 @@ def _plain_defaults(fn):
     (tests, internal reuse) binds the raw FieldInfo object for omitted params.
     This wrapper injects each FieldInfo's real default instead. The original
     signature is preserved (via __wrapped__), so FastMCP schemas are unchanged.
+    It also saves the registries after every call, for a restarted server.
     """
     import inspect
     from pydantic.fields import FieldInfo
@@ -120,11 +121,17 @@ def _plain_defaults(fn):
     if inspect.iscoroutinefunction(fn):
         @functools.wraps(fn)
         async def wrapper(*args, **kwargs):
-            return await fn(*args, **fill(args, kwargs))
+            try:
+                return await fn(*args, **fill(args, kwargs))
+            finally:
+                registry.save()
     else:
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
-            return fn(*args, **fill(args, kwargs))
+            try:
+                return fn(*args, **fill(args, kwargs))
+            finally:
+                registry.save()
     return wrapper
 
 # Client cwd from roots/list (cached after first query)
@@ -269,7 +276,10 @@ async def _read_after_on_pane(p: str, code: str, lang: str, read_after: float, t
         result: list[str] = []
         capturing = False
         for line in lines_full:
-            if line == begin:
+            # The tty echoes the code typed ahead before the marker prints, so
+            # the marker can end a line (`ssh host_X..._B_`). The echoed marker
+            # command ends in a quote or a parenthesis instead.
+            if not capturing and line.endswith(begin):
                 capturing = True
                 continue
             if capturing:
@@ -961,4 +971,5 @@ def main():
     )
     os.environ.pop("VIRTUAL_ENV", None)
     events.init()
+    registry.init()
     mcp.run(transport="stdio")

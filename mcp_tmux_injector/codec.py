@@ -35,11 +35,19 @@ def generate_task_id_and_marker() -> tuple[str, str, str]:
     return task_id, f"{marker}B_", f"{marker}E_"
 
 
+SCROLLBACK_LOST = "[the begin marker left the scrollback (clear, reset or history-limit); output from the oldest line kept]"
+
+
 def extract_output(raw: str, begin: str, end: str) -> tuple[str, bool]:
-    """Extract output between markers. Returns (output, is_complete)."""
+    """Extract output between markers. Returns (output, is_complete).
+
+    With the end marker present but the begin marker gone, the command erased
+    the scrollback (`clear` sends \\e[3J on most terminfo entries) or outran
+    history-limit; the lines kept before the end marker are its output."""
     lines = split_capture(raw)
     capturing = False
     result = []
+    before_end = []
     completed = False
 
     for line in lines:
@@ -51,7 +59,13 @@ def extract_output(raw: str, begin: str, end: str) -> tuple[str, bool]:
             break
         if capturing:
             result.append(line)
+        else:
+            before_end.append(line)
 
+    if completed and not capturing:
+        while before_end and before_end[0] == "":
+            before_end.pop(0)
+        return '\n'.join([SCROLLBACK_LOST] + before_end), True
     return '\n'.join(result), completed
 
 
